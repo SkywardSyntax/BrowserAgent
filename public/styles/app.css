@@ -128,7 +128,7 @@ body {
   position: relative;
   overflow: hidden;
 }
-.live .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.live .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
 .live .toolbar .btn { height: 28px; padding: 4px 10px; }
 .live .toolbar .muted { opacity: .85; }
 .live .frame { position: relative; background: radial-gradient(120% 120% at 0% 0%, #0b0f17 0%, #0a0d14 60%); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; min-height: 240px; box-shadow: inset 0 0 40px rgba(0,0,0,.35); }
@@ -144,9 +144,12 @@ body {
 .live .frame:has(img:not([src])) .backdrop { display: none; }
 @keyframes float1 { from { transform: translate(0,0); } to { transform: translate(30px, 20px); } }
 @keyframes float2 { from { transform: translate(0,0); } to { transform: translate(-25px, -30px); } }
-.live img {
-  width: 100%; display: block; aspect-ratio: 16/9; object-fit: contain; background: #0b0f17;
-}
+.live img { width: 100%; height: auto; display: block; background: #0b0f17; }
+/* Remote cursor indicator */
+.remote-cursor { position: absolute; width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,.95); box-shadow: 0 0 0 2px rgba(0,0,0,.45); pointer-events: none; transform: translate(-50%, -50%); z-index: 30; transition: transform .05s linear, opacity .12s ease; opacity: 0; }
+/* Click pulse feedback */
+.click-pulse { position: absolute; width: 10px; height: 10px; border: 2px solid rgba(255,255,255,.9); border-radius: 9999px; transform: translate(-50%, -50%); animation: clickPulse .6s ease-out forwards; z-index: 25; pointer-events: none; }
+@keyframes clickPulse { from { opacity: 1; transform: translate(-50%, -50%) scale(.6); } to { opacity: 0; transform: translate(-50%, -50%) scale(2.2); } }
 
 /* Placeholder handled by JS overlay now. */
 
@@ -164,7 +167,7 @@ body {
 .status {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
 }
-.status .pill { padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--border); }
+.status .pill { padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid var(--border); max-width: 200px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pill.created { color: #1e40af; background: #0b254a; }
 .pill.running { color: #166534; background: #0c2f1d; }
 .pill.paused { color: #92400e; background: #3a2403; }
@@ -214,8 +217,10 @@ select { background: #11151c; color: var(--text); border: 1px solid var(--border
 .sidebar-header { font-weight: 700; color: var(--muted); padding: 8px; border-bottom: 1px solid var(--border); }
 .sidebar-list { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
 .sidebar-item { display: grid; grid-template-columns: 1fr auto; gap: 6px 8px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 12px; cursor: pointer; background: rgba(255,255,255,0.02); }
-.sidebar-item .title { font-weight: 600; }
+.sidebar-item .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-item .meta { grid-column: 1 / span 1; font-size: 12px; color: var(--muted); }
 .sidebar-item .actions { display: flex; gap: 6px; }
 .sidebar-item.active { outline: 2px solid color-mix(in lab, var(--primary), white 12%); background: rgba(124,92,255,.07); }
 
+/* General text overflow safety in content blocks */
+.panel, .log, .status, .sidebar { word-break: break-word; }
