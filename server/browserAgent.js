@@ -7,6 +7,7 @@ export class BrowserAgent {
     this.browser = null;
     this.page = null;
     this.processingTasks = new Set();
+    this.headless = undefined; // resolved at launch
 
     // Initialize OpenAI client
     this.openai = new OpenAI({
@@ -45,22 +46,88 @@ export class BrowserAgent {
     if (this.browser) return;
 
     try {
-      this.browser = await chromium.launch({
-        headless: process.env.BROWSER_HEADLESS === 'true',
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-      });
+      let headless = this.resolveHeadless();
+      this.headless = headless;
+
+      const launch = async (isHeadless) =>
+        chromium.launch({
+          headless: isHeadless,
+          args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            ...(isHeadless ? ['--disable-gpu'] : [])
+          ]
+        });
+
+      try {
+        this.browser = await launch(headless);
+      } catch (e) {
+        // If headed launch failed due to missing X server, retry headless
+        const msg = String(e && e.message || e);
+        const looksLikeNoX = /Missing X server|DISPLAY|x11|Target page, context or browser has been closed/i.test(msg);
+        if (!headless && looksLikeNoX) {
+          console.warn('Headed launch failed likely due to missing X server. Falling back to headless.');
+          headless = true;
+          this.headless = true;
+          this.browser = await launch(true);
+        } else {
+          throw e;
+        }
+      }
 
       this.page = await this.browser.newPage();
-      
       await this.page.setViewportSize({
         width: this.displayWidth,
         height: this.displayHeight
       });
 
-      console.log('Browser initialized successfully');
+      console.log(`Browser initialized successfully (headless=${headless})`);
     } catch (error) {
       console.error('Failed to initialize browser:', error);
       throw error;
+    }
+  }
+
+  // Determine headless mode robustly:
+  // - If no DISPLAY/X server is present, FORCE headless true regardless of override
+  // - Else, if BROWSER_HEADLESS is set, honor it ("true"/"false")
+  // - Else, default to headed (false) when a display exists, otherwise headless
+  resolveHeadless() {
+    const hasDisplay = !!process.env.DISPLAY;
+
+    // If there is no display, we must use headless
+    if (!hasDisplay) return true;
+
+    // If a display exists, allow explicit override
+    if (typeof process.env.BROWSER_HEADLESS === 'string') {
+      const val = process.env.BROWSER_HEADLESS.trim().toLowerCase();
+      if (val === 'true') return true;
+      if (val === 'false') return false;
+    }
+
+    // Default to headed when a display exists
+    return false;
+  }
+
+  getHeadless() {
+    return typeof this.headless === 'boolean' ? this.headless : this.resolveHeadless();
+  }
+
+  async getPageState() {
+    try {
+      await this.initializeBrowser();
+      const url = this.page ? this.page.url() : '';
+      let title = '';
+      try { title = this.page ? await this.page.title() : ''; } catch {}
+      return {
+        url,
+        title,
+        headless: this.getHeadless(),
+        viewport: { width: this.displayWidth, height: this.displayHeight }
+      };
+    } catch (e) {
+      return { url: '', title: '', headless: this.getHeadless(), viewport: { width: this.displayWidth, height: this.displayHeight } };
     }
   }
 
@@ -349,6 +416,18 @@ ${context}`
           if (action.url) {
             await this.page.goto(action.url);
           }
+          break;
+
+        case 'reload':
+          await this.page.reload();
+          break;
+
+        case 'go_back':
+          await this.page.goBack();
+          break;
+
+        case 'go_forward':
+          await this.page.goForward();
           break;
 
         case 'wait':

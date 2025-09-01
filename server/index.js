@@ -48,6 +48,33 @@ app.post('/api/tasks', async (req, res) => {
   }
 });
 
+// Rename/update task
+app.patch('/api/tasks/:taskId', (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const { description } = req.body || {};
+    const ok = taskManager.updateTask(taskId, description ? { description } : {});
+    if (!ok) return res.status(404).json({ error: 'Task not found' });
+    res.json({ status: 'updated' });
+  } catch (e) {
+    console.error('Error updating task:', e);
+    res.status(500).json({ error: 'Failed to update task' });
+  }
+});
+
+// Delete task
+app.delete('/api/tasks/:taskId', (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const ok = taskManager.deleteTask(taskId);
+    if (!ok) return res.status(404).json({ error: 'Task not found' });
+    res.json({ status: 'deleted' });
+  } catch (e) {
+    console.error('Error deleting task:', e);
+    res.status(500).json({ error: 'Failed to delete task' });
+  }
+});
+
 // Get task status
 app.get('/api/tasks/:taskId', (req, res) => {
   try {
@@ -83,11 +110,21 @@ app.get('/api/info', (req, res) => {
     res.json({
       model: browserAgent.deploymentName,
       viewport: { width: browserAgent.displayWidth, height: browserAgent.displayHeight },
-      headless: process.env.BROWSER_HEADLESS === 'true',
+      headless: browserAgent.getHeadless(),
       wsUrl: `ws://localhost:${PORT}`,
     });
   } catch (error) {
     res.status(500).json({ error: 'Failed to get info' });
+  }
+});
+
+// Current page state (url/title) for UI chrome overlay
+app.get('/api/page-state', async (req, res) => {
+  try {
+    const state = await browserAgent.getPageState();
+    res.json(state);
+  } catch (e) {
+    res.status(500).json({ error: 'Failed to get page state' });
   }
 });
 
@@ -109,6 +146,27 @@ app.get('/api/tasks/:taskId/screenshot', (req, res) => {
   } catch (error) {
     console.error('Error getting screenshot:', error);
     res.status(500).send('Failed to get screenshot');
+  }
+});
+
+// Manual browser action
+app.post('/api/tasks/:taskId/action', async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const action = req.body;
+    const task = taskManager.getTask(taskId);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+
+    // Ensure browser ready
+    await browserAgent.initializeBrowser();
+    const result = await browserAgent.executeBrowserAction(taskId, action);
+    const screenshot = await browserAgent.takeScreenshot();
+    taskManager.addScreenshot(taskId, screenshot);
+
+    res.json({ result, screenshot });
+  } catch (e) {
+    console.error('Error executing manual action:', e);
+    res.status(500).json({ error: 'Failed to execute action', details: e.message });
   }
 });
 

@@ -183,7 +183,7 @@ export class TaskManager {
     if (!ids) return [];
     return Array.from(ids)
       .map((id) => this.tasks.get(id))
-      .filter(Boolean);
+      .filter((t) => t && t.status !== 'deleted' && !t.deleted);
   }
 
   subscribe(callback) {
@@ -223,5 +223,25 @@ export class TaskManager {
         }
       });
     }
+  }
+
+  deleteTask(taskId) {
+    const task = this.tasks.get(taskId);
+    if (!task) return false;
+
+    task.status = 'deleted';
+    task.deleted = true;
+    task.updatedAt = new Date().toISOString();
+
+    // Remove from session map
+    if (task.sessionId && this.sessionTasks.has(task.sessionId)) {
+      const set = this.sessionTasks.get(task.sessionId);
+      set.delete(task.id);
+      if (set.size === 0) this.sessionTasks.delete(task.sessionId);
+    }
+
+    this.tasks.set(taskId, task);
+    this.notifySubscribers(taskId, task);
+    return true;
   }
 }

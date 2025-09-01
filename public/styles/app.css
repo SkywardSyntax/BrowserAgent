@@ -48,6 +48,7 @@ body {
   gap: 16px;
   padding: 18px;
 }
+.content.with-sidebar { grid-template-columns: 280px 1.05fr .95fr; }
 
 @media (max-width: 1100px) {
   .content { grid-template-columns: 1fr; }
@@ -58,6 +59,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 16px;
   padding: 16px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.25);
 }
 
 .hero {
@@ -126,25 +128,33 @@ body {
   position: relative;
   overflow: hidden;
 }
-.live .toolbar {
-  display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
-}
-.live .frame {
-  position: relative;
-  background: #0b0f17;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  overflow: hidden;
-  min-height: 240px;
-}
+.live .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.live .toolbar .btn { height: 28px; padding: 4px 10px; }
+.live .toolbar .muted { opacity: .85; }
+.live .frame { position: relative; background: radial-gradient(120% 120% at 0% 0%, #0b0f17 0%, #0a0d14 60%); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; min-height: 240px; box-shadow: inset 0 0 40px rgba(0,0,0,.35); }
+/* Manual control mode outline on the frame element itself */
+.live .frame.manual { outline: 2px dashed color-mix(in lab, var(--primary), white 30%); outline-offset: -8px; }
+.live .backdrop { position: absolute; inset: 0; overflow: hidden; z-index: 0; }
+.live .backdrop::before, .live .backdrop::after { content: ""; position: absolute; border-radius: 50%; filter: blur(40px); opacity: .6; }
+/* Soft moving blobs to create a gentle geometric background */
+.live .backdrop::before { width: 320px; height: 320px; background: radial-gradient(circle at 30% 30%, color-mix(in lab, var(--primary), white 20%), transparent 60%); left: -60px; top: -60px; animation: float1 12s ease-in-out infinite alternate; }
+.live .backdrop::after { width: 260px; height: 260px; background: radial-gradient(circle at 70% 70%, rgba(59,130,246,.35), transparent 60%); right: -40px; bottom: -40px; animation: float2 14s ease-in-out infinite alternate; }
+/* Hide backdrop when no image */
+.live .frame:has(img[src=""]) .backdrop,
+.live .frame:has(img:not([src])) .backdrop { display: none; }
+@keyframes float1 { from { transform: translate(0,0); } to { transform: translate(30px, 20px); } }
+@keyframes float2 { from { transform: translate(0,0); } to { transform: translate(-25px, -30px); } }
 .live img {
   width: 100%; display: block; aspect-ratio: 16/9; object-fit: contain; background: #0b0f17;
 }
 
+/* Placeholder handled by JS overlay now. */
+
 .badge {
-  display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px; font-size: 12px; border: 1px solid var(--border); background: rgba(255,255,255,0.04);
+  display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 999px; font-size: 13px; border: 1px solid var(--border); background: rgba(255,255,255,0.05);
 }
-.badge .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 0 rgba(34,197,94,.7); animation: dot 2s infinite; }
+/* Make the dot slightly wider (oval) for better visual weight */
+.badge .dot { width: 16px; height: 12px; border-radius: 999px; background: var(--success); box-shadow: 0 0 0 0 rgba(34,197,94,.7); animation: dot 2s infinite; }
 @keyframes dot { 0%{ box-shadow: 0 0 0 0 rgba(34,197,94,.7);} 70%{ box-shadow: 0 0 0 10px rgba(34,197,94,0);} 100%{ box-shadow: 0 0 0 0 rgba(34,197,94,0);} }
 
 /* Status + activity */
@@ -164,11 +174,24 @@ body {
 
 .controls { display: flex; gap: 8px; }
 .btn {
-  display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 10px; background: #11151c; color: var(--text); border: 1px solid var(--border); cursor: pointer; transition: background .15s;
+  display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 10px; background: #11151c; color: var(--text); border: 1px solid var(--border); cursor: pointer; transition: background .15s, box-shadow .2s, transform .05s;
 }
-.btn:hover { background: #151a22; }
+.btn:hover { background: #151a22; box-shadow: 0 8px 18px rgba(0,0,0,.25); }
+.btn:active { transform: translateY(1px); }
 .btn.primary { background: linear-gradient(180deg, var(--primary), var(--primary-600)); border-color: transparent; color: white; box-shadow: 0 6px 18px rgba(124,92,255,.35); }
 .btn.danger { background: #2a1414; color: #ffb4b4; border-color: #3a1b1b; }
+.btn.small { padding: 4px 8px; border-radius: 8px; font-size: 12px; }
+
+/* Selects */
+select { background: #11151c; color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; }
+/* In-house Dropdown component */
+.dropdown { position: relative; display: inline-block; }
+.dropdown.small .btn { padding: 4px 8px; font-size: 12px; border-radius: 8px; }
+.dropdown .dropdown-menu { position: absolute; top: calc(100% + 6px); left: 0; min-width: 160px; background: #0f131a; border: 1px solid var(--border); border-radius: 10px; padding: 6px; display: none; box-shadow: 0 12px 28px rgba(0,0,0,.35); z-index: 20; }
+.dropdown.open .dropdown-menu { display: block; }
+.dropdown-item { display: block; width: 100%; text-align: left; padding: 8px 10px; border-radius: 8px; border: 0; background: transparent; color: var(--text); cursor: pointer; }
+.dropdown-item:hover { background: rgba(255,255,255,.05); }
+.dropdown-item.active { background: rgba(124,92,255,.15); color: white; }
 
 .log {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
@@ -185,4 +208,14 @@ body {
 
 .subtle { opacity: .9; }
 .small { font-size: 12px; }
+
+/* Sidebar */
+.sidebar { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 12px; display: flex; flex-direction: column; gap: 8px; height: 100%; }
+.sidebar-header { font-weight: 700; color: var(--muted); padding: 8px; border-bottom: 1px solid var(--border); }
+.sidebar-list { display: flex; flex-direction: column; gap: 8px; overflow: auto; }
+.sidebar-item { display: grid; grid-template-columns: 1fr auto; gap: 6px 8px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 12px; cursor: pointer; background: rgba(255,255,255,0.02); }
+.sidebar-item .title { font-weight: 600; }
+.sidebar-item .meta { grid-column: 1 / span 1; font-size: 12px; color: var(--muted); }
+.sidebar-item .actions { display: flex; gap: 6px; }
+.sidebar-item.active { outline: 2px solid color-mix(in lab, var(--primary), white 12%); background: rgba(124,92,255,.07); }
 
