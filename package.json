@@ -7,7 +7,8 @@
     "dev": "bun run server/index.js",
     "build": "next build",
     "start": "next start",
-    "setup": "bun run setup.js"
+    "setup": "bun run setup.js",
+    "test": "bun run test.js"
   },
   "dependencies": {
     "next": "^14.2.30",
