@@ -30,13 +30,13 @@ app.get('/health', (req, res) => {
 // Task submission endpoint
 app.post('/api/tasks', async (req, res) => {
   try {
-    const { task } = req.body;
+    const { task, sessionId } = req.body;
     
     if (!task) {
       return res.status(400).json({ error: 'Task is required' });
     }
 
-    const taskId = await taskManager.createTask(task);
+    const taskId = await taskManager.createTask(task, sessionId || null);
     res.json({ taskId, status: 'created' });
     
     // Start processing the task
@@ -62,6 +62,53 @@ app.get('/api/tasks/:taskId', (req, res) => {
   } catch (error) {
     console.error('Error getting task:', error);
     res.status(500).json({ error: 'Failed to get task' });
+  }
+});
+
+// Get tasks for a session
+app.get('/api/sessions/:sessionId/tasks', (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const tasks = taskManager.getTasksBySession(sessionId);
+    res.json({ sessionId, tasks });
+  } catch (error) {
+    console.error('Error getting session tasks:', error);
+    res.status(500).json({ error: 'Failed to get session tasks' });
+  }
+});
+
+// Get server/model info for UI display
+app.get('/api/info', (req, res) => {
+  try {
+    res.json({
+      model: browserAgent.deploymentName,
+      viewport: { width: browserAgent.displayWidth, height: browserAgent.displayHeight },
+      headless: process.env.BROWSER_HEADLESS === 'true',
+      wsUrl: `ws://localhost:${PORT}`,
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to get info' });
+  }
+});
+
+// Get latest screenshot for a task
+app.get('/api/tasks/:taskId/screenshot', (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const task = taskManager.getTask(taskId);
+    if (!task) return res.status(404).send('Task not found');
+    const last = task.screenshots && task.screenshots[task.screenshots.length - 1];
+    if (!last) return res.status(404).send('No screenshot');
+    const img = Buffer.from(last.data, 'base64');
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Content-Length': img.length,
+      'Cache-Control': 'no-store',
+    });
+    res.end(img);
+  } catch (error) {
+    console.error('Error getting screenshot:', error);
+    res.status(500).send('Failed to get screenshot');
   }
 });
 

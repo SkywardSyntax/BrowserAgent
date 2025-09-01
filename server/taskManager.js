@@ -4,9 +4,11 @@ export class TaskManager {
   constructor() {
     this.tasks = new Map();
     this.subscribers = new Set();
+    // Map sessionId -> Set of taskIds for session scoping
+    this.sessionTasks = new Map();
   }
 
-  createTask(description) {
+  createTask(description, sessionId = null) {
     const taskId = uuidv4();
     const task = {
       id: taskId,
@@ -18,10 +20,17 @@ export class TaskManager {
       currentStep: null,
       screenshots: [],
       error: null,
-      paused: false
+      paused: false,
+      sessionId: sessionId || null,
     };
 
     this.tasks.set(taskId, task);
+    if (task.sessionId) {
+      if (!this.sessionTasks.has(task.sessionId)) {
+        this.sessionTasks.set(task.sessionId, new Set());
+      }
+      this.sessionTasks.get(task.sessionId).add(taskId);
+    }
     this.notifySubscribers(taskId, task);
     
     return taskId;
@@ -168,6 +177,15 @@ export class TaskManager {
     return Array.from(this.tasks.values());
   }
 
+  getTasksBySession(sessionId) {
+    if (!sessionId) return [];
+    const ids = this.sessionTasks.get(sessionId);
+    if (!ids) return [];
+    return Array.from(ids)
+      .map((id) => this.tasks.get(id))
+      .filter(Boolean);
+  }
+
   subscribe(callback) {
     this.subscribers.add(callback);
     
@@ -198,6 +216,11 @@ export class TaskManager {
       const toDelete = completedTasks.slice(100);
       toDelete.forEach(task => {
         this.tasks.delete(task.id);
+        if (task.sessionId && this.sessionTasks.has(task.sessionId)) {
+          const set = this.sessionTasks.get(task.sessionId);
+          set.delete(task.id);
+          if (set.size === 0) this.sessionTasks.delete(task.sessionId);
+        }
       });
     }
   }
