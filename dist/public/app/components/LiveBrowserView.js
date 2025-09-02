@@ -350,7 +350,7 @@ export function LiveBrowserView() {
     if (!manual || !currentTask) return;
     if (!isMouseDown) return;
     const now = Date.now();
-    if (now - lastMoveAt < 30) return; // throttle moves
+    if (now - lastMoveAt < 16) return; // throttle moves (~60fps)
     lastMoveAt = now;
     const targetEl = streamActive ? canvas : img;
     const rect = targetEl.getBoundingClientRect();
@@ -364,15 +364,22 @@ export function LiveBrowserView() {
   });
 
   // Scroll -> send wheel actions
-  let lastWheel = 0;
-  frame.addEventListener('wheel', async (ev) => {
+  // Coalesce deltas and send once per animation frame for smoothness
+  let wheelAccumX = 0;
+  let wheelAccumY = 0;
+  let wheelRaf = null;
+  frame.addEventListener('wheel', (ev) => {
     if (!manual || !currentTask) return;
     ev.preventDefault();
-    const now = Date.now();
-    if (now - lastWheel < 120) return; // throttle
-    lastWheel = now;
-    // Send precise deltas for smoother scrolling
-    await sendAction({ action: 'wheel', deltaX: ev.deltaX || 0, deltaY: ev.deltaY || 0, reason: 'User wheel scroll' });
+    wheelAccumX += ev.deltaX || 0;
+    wheelAccumY += ev.deltaY || 0;
+    if (!wheelRaf) {
+      wheelRaf = requestAnimationFrame(async () => {
+        const dx = wheelAccumX; const dy = wheelAccumY;
+        wheelAccumX = 0; wheelAccumY = 0; wheelRaf = null;
+        await sendAction({ action: 'wheel', deltaX: dx, deltaY: dy, reason: 'User wheel scroll' });
+      });
+    }
   }, { passive: false });
 
   window.addEventListener('keydown', async (ev) => {
@@ -433,26 +440,30 @@ export function LiveBrowserView() {
   }
 
   function update(base64Png) {
-    // Show overlay while the new image is loading
-    const ov = frame.querySelector('.overlay-cta');
-    if (ov && !manual) ov.classList.remove('hidden');
-    img.onload = () => {
-      if (ov) ov.classList.add('hidden');
-    };
+    // If a live stream is active, avoid swapping away from the canvas.
+    // Still keep <img> in sync for download/open actions.
     img.src = `data:image/png;base64,${base64Png}`;
-    // Ensure image is the visible layer when not streaming
-    img.style.display = 'block';
-    canvas.style.display = 'none';
-    // Estimate live aspect ratio from natural size when it becomes available to lock layout
-    img.decode?.().then(() => {
-      const w = img.naturalWidth || 1280;
-      const h = img.naturalHeight || 800;
-      if (w > 0 && h > 0) frame.style.setProperty('--live-ar', (w/h).toString());
-    }).catch(() => {});
-    last.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    if (!streamActive) {
+      // Show overlay while the new image is loading when not streaming
+      const ov = frame.querySelector('.overlay-cta');
+      if (ov && !manual) ov.classList.remove('hidden');
+      img.onload = () => { if (ov) ov.classList.add('hidden'); };
+      // Ensure image is the visible layer when not streaming
+      img.style.display = 'block';
+      canvas.style.display = 'none';
+      // Estimate live aspect ratio from natural size when it becomes available to lock layout
+      img.decode?.().then(() => {
+        const w = img.naturalWidth || 1280;
+        const h = img.naturalHeight || 800;
+        if (w > 0 && h > 0) frame.style.setProperty('--live-ar', (w/h).toString());
+      }).catch(() => {});
+      last.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    }
   }
 
   // Draw a live frame (JPEG/PNG) onto the canvas
+  // Draw a live frame (JPEG/PNG) onto the canvas with basic out-of-order drop
+  let lastSeq = 0;
   function drawFrame(frameData) {
     if (!frameData || !frameData.data) return;
     const { data, metadata, format } = frameData;
@@ -465,8 +476,11 @@ export function LiveBrowserView() {
     // Switch to canvas display for live streaming frames
     img.style.display = 'none';
     canvas.style.display = 'block';
+    const seq = ++lastSeq;
     const image = new Image();
     image.onload = () => {
+      // Drop if a newer frame has already been queued
+      if (seq !== lastSeq) return;
       const w = (metadata && (metadata.deviceWidth || image.naturalWidth)) || image.naturalWidth;
       const h = (metadata && (metadata.deviceHeight || image.naturalHeight)) || image.naturalHeight;
       if (canvas.width !== w || canvas.height !== h) {
@@ -495,7 +509,16 @@ export function LiveBrowserView() {
     setTimeout(() => dot.remove(), 600);
   }
 
-  return Object.assign(wrap, { update, setTask, setSocket, drawFrame });
+  return Object.assign(wrap, {
+    update,
+    setTask,
+    setSocket,
+    drawFrame,
+    // Expose state for parent so it can avoid clobbering during streaming
+    isStreaming: () => streamActive,
+    isManual: () => manual,
+    isExpanded: () => expanded,
+  });
 
   // Helpers
   function urlsMatch(a, b) {
@@ -523,6 +546,10 @@ export function LiveBrowserView() {
     try {
       // Prefer low-latency WS path during expanded manual sessions
       if (manual && expanded && socket && socket.readyState === WebSocket.OPEN) {
+        // Apply simple backpressure: drop high-frequency inputs when socket is congested
+        const congested = socket.bufferedAmount && socket.bufferedAmount > 1000000; // ~1MB
+        const isHighFreq = action && (action.action === 'wheel' || action.action === 'mouse_move');
+        if (congested && isHighFreq) return; // drop to keep latency low
         socket.send(JSON.stringify({ type: 'input', taskId: currentTask.id, action }));
         return;
       }

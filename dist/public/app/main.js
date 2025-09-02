@@ -415,7 +415,7 @@ function LiveBrowserView() {
     if (!isMouseDown)
       return;
     const now = Date.now();
-    if (now - lastMoveAt < 30)
+    if (now - lastMoveAt < 16)
       return;
     lastMoveAt = now;
     const targetEl = streamActive ? canvas : img;
@@ -428,16 +428,25 @@ function LiveBrowserView() {
     const y = Math.round(relY * vh);
     await sendAction({ action: "mouse_move", coordinates: { x, y }, reason: "User mouse move (drag)" });
   });
-  let lastWheel = 0;
-  frame.addEventListener("wheel", async (ev) => {
+  let wheelAccumX = 0;
+  let wheelAccumY = 0;
+  let wheelRaf = null;
+  frame.addEventListener("wheel", (ev) => {
     if (!manual || !currentTask)
       return;
     ev.preventDefault();
-    const now = Date.now();
-    if (now - lastWheel < 120)
-      return;
-    lastWheel = now;
-    await sendAction({ action: "wheel", deltaX: ev.deltaX || 0, deltaY: ev.deltaY || 0, reason: "User wheel scroll" });
+    wheelAccumX += ev.deltaX || 0;
+    wheelAccumY += ev.deltaY || 0;
+    if (!wheelRaf) {
+      wheelRaf = requestAnimationFrame(async () => {
+        const dx = wheelAccumX;
+        const dy = wheelAccumY;
+        wheelAccumX = 0;
+        wheelAccumY = 0;
+        wheelRaf = null;
+        await sendAction({ action: "wheel", deltaX: dx, deltaY: dy, reason: "User wheel scroll" });
+      });
+    }
   }, { passive: false });
   window.addEventListener("keydown", async (ev) => {
     if (!manual || !currentTask)
@@ -488,24 +497,27 @@ function LiveBrowserView() {
     }
   }
   function update(base64Png) {
-    const ov = frame.querySelector(".overlay-cta");
-    if (ov && !manual)
-      ov.classList.remove("hidden");
-    img.onload = () => {
-      if (ov)
-        ov.classList.add("hidden");
-    };
     img.src = `data:image/png;base64,${base64Png}`;
-    img.style.display = "block";
-    canvas.style.display = "none";
-    img.decode?.().then(() => {
-      const w = img.naturalWidth || 1280;
-      const h = img.naturalHeight || 800;
-      if (w > 0 && h > 0)
-        frame.style.setProperty("--live-ar", (w / h).toString());
-    }).catch(() => {});
-    last.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    if (!streamActive) {
+      const ov = frame.querySelector(".overlay-cta");
+      if (ov && !manual)
+        ov.classList.remove("hidden");
+      img.onload = () => {
+        if (ov)
+          ov.classList.add("hidden");
+      };
+      img.style.display = "block";
+      canvas.style.display = "none";
+      img.decode?.().then(() => {
+        const w = img.naturalWidth || 1280;
+        const h = img.naturalHeight || 800;
+        if (w > 0 && h > 0)
+          frame.style.setProperty("--live-ar", (w / h).toString());
+      }).catch(() => {});
+      last.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    }
   }
+  let lastSeq = 0;
   function drawFrame(frameData) {
     if (!frameData || !frameData.data)
       return;
@@ -517,8 +529,11 @@ function LiveBrowserView() {
     img.src = src;
     img.style.display = "none";
     canvas.style.display = "block";
+    const seq = ++lastSeq;
     const image = new Image;
     image.onload = () => {
+      if (seq !== lastSeq)
+        return;
       const w = metadata && (metadata.deviceWidth || image.naturalWidth) || image.naturalWidth;
       const h = metadata && (metadata.deviceHeight || image.naturalHeight) || image.naturalHeight;
       if (canvas.width !== w || canvas.height !== h) {
@@ -545,7 +560,15 @@ function LiveBrowserView() {
     frame.appendChild(dot);
     setTimeout(() => dot.remove(), 600);
   }
-  return Object.assign(wrap, { update, setTask, setSocket, drawFrame });
+  return Object.assign(wrap, {
+    update,
+    setTask,
+    setSocket,
+    drawFrame,
+    isStreaming: () => streamActive,
+    isManual: () => manual,
+    isExpanded: () => expanded
+  });
   function urlsMatch(a, b) {
     const norm = (u) => {
       if (!u)
@@ -568,6 +591,10 @@ function LiveBrowserView() {
   async function sendAction(action) {
     try {
       if (manual && expanded && socket && socket.readyState === WebSocket.OPEN) {
+        const congested = socket.bufferedAmount && socket.bufferedAmount > 1e6;
+        const isHighFreq = action && (action.action === "wheel" || action.action === "mouse_move");
+        if (congested && isHighFreq)
+          return;
         socket.send(JSON.stringify({ type: "input", taskId: currentTask.id, action }));
         return;
       }
@@ -1051,8 +1078,9 @@ class App {
     if (this.liveView && this.liveView.setTask)
       this.liveView.setTask(task);
     const last = (task.screenshots || [])[task.screenshots.length - 1];
-    if (last)
+    if (last && !(this.liveView && this.liveView.isStreaming && this.liveView.isStreaming())) {
       this.liveView.update(last.data);
+    }
     if (this.ws && this.ws.readyState === WebSocket.OPEN && task && task.id) {
       this.ws.send(JSON.stringify({ type: "subscribe", taskId: task.id }));
     }

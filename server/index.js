@@ -271,9 +271,15 @@ wss.on('connection', (ws) => {
               }
               // Ensure browser is up
               await browserAgent.initializeBrowser();
+              ws._lastFrameTs = 0;
               ws._stopStream = await browserAgent.addScreencastListener((frame) => {
                 // Guard if ws is closed
                 if (ws.readyState !== ws.OPEN) return;
+                // Basic throttling (~33fps max) and backpressure-aware dropping
+                const now = Date.now();
+                if (ws._lastFrameTs && (now - ws._lastFrameTs) < 30) return;
+                if (typeof ws.bufferedAmount === 'number' && ws.bufferedAmount > 1500000) return; // ~1.5MB backlog
+                ws._lastFrameTs = now;
                 ws.send(JSON.stringify({ type: 'screencastFrame', frame }));
               });
               ws.send(JSON.stringify({ type: 'screencastStarted' }));

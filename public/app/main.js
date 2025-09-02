@@ -193,7 +193,10 @@ class App {
     this.activityLog.update(task.steps || []);
     if (this.liveView && this.liveView.setTask) this.liveView.setTask(task);
     const last = (task.screenshots || [])[task.screenshots.length - 1];
-    if (last) this.liveView.update(last.data);
+    // Avoid clobbering the live canvas during manual streaming sessions
+    if (last && !(this.liveView && this.liveView.isStreaming && this.liveView.isStreaming())) {
+      this.liveView.update(last.data);
+    }
     // Keep subscription; screencast is driven by manual control only
     if (this.ws && this.ws.readyState === WebSocket.OPEN && task && task.id) {
       this.ws.send(JSON.stringify({ type: 'subscribe', taskId: task.id }));
