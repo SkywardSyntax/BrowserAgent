@@ -230,11 +230,12 @@ wss.on('connection', (ws) => {
   
   // Subscribe to task updates
   const unsubscribe = taskManager.subscribe((taskId, task) => {
-    ws.send(JSON.stringify({
-      type: 'taskUpdate',
-      taskId,
-      task
-    }));
+    try {
+      // Only forward updates for the subscribed task (if set)
+      if (ws.taskId && ws.taskId !== taskId) return;
+      if (ws.readyState !== ws.OPEN) return;
+      ws.send(JSON.stringify({ type: 'taskUpdate', taskId, task }));
+    } catch {}
   });
   
   ws.on('message', (message) => {

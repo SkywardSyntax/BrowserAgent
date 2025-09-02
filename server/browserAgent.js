@@ -8,6 +8,8 @@ export class BrowserAgent {
     this.page = null;
     this.processingTasks = new Set();
     this.headless = undefined; // resolved at launch
+    // Track in-flight AI requests per task for cancellation
+    this.abortControllers = new Map();
 
     // Initialize OpenAI client
     this.openai = new OpenAI({
@@ -17,11 +19,15 @@ export class BrowserAgent {
       defaultHeaders: {
         'api-key': process.env.AZURE_OPENAI_API_KEY,
       },
+      // Add resiliency for flaky networks
+      timeout: parseInt(process.env.OPENAI_TIMEOUT_MS || '60000', 10),
+      maxRetries: parseInt(process.env.OPENAI_MAX_RETRIES || '1', 10),
     });
 
     this.displayWidth = parseInt(process.env.DISPLAY_WIDTH) || 1280;
     this.displayHeight = parseInt(process.env.DISPLAY_HEIGHT) || 720;
     this.deploymentName = process.env.AZURE_OPENAI_DEPLOYMENT_NAME || 'gpt-4o';
+    this.openAITimeoutMs = parseInt(process.env.OPENAI_TIMEOUT_MS || '60000', 10);
 
     // Key mappings for Playwright
     this.keyMap = {
@@ -49,6 +55,20 @@ export class BrowserAgent {
       usingCDP: false,
       interval: null,
     };
+
+    // Abort any in-flight AI request immediately on pause/stop for smoother manual handoff
+    this._unsubscribeTM = this.taskManager.subscribe((id, task) => {
+      try {
+        if (!task || !task.status) return;
+        if (['paused', 'stopped', 'failed', 'completed'].includes(task.status)) {
+          const ctrl = this.abortControllers.get(id);
+          if (ctrl) {
+            ctrl.abort();
+            this.abortControllers.delete(id);
+          }
+        }
+      } catch {}
+    });
   }
 
   async initializeBrowser() {
@@ -306,6 +326,14 @@ export class BrowserAgent {
         const screenshot = await this.takeScreenshot();
         this.taskManager.addScreenshot(taskId, screenshot);
 
+        // Re-check pause/stop before calling the model to allow quick manual takeover
+        const t2 = this.taskManager.getTask(taskId);
+        if (t2.status === 'paused') {
+          await this.waitForResume(taskId);
+          continue;
+        }
+        if (t2.status === 'stopped') break;
+
         // Get AI response with function calling
         const response = await this.callAI(task, screenshot);
         
@@ -331,6 +359,10 @@ export class BrowserAgent {
         // Continue with next iteration unless it's a critical error
         if (error.message.includes('browser') || error.message.includes('page')) {
           throw error;
+        }
+        // If aborted due to pause/stop, just wait/resume loop
+        if (error.name === 'AbortError') {
+          await this.waitForResume(taskId);
         }
       }
     }
@@ -497,6 +529,10 @@ ${context}`
       }
     ];
 
+    // Abortable, time-bounded AI call for robustness
+    const controller = new AbortController();
+    // Track so pause/stop can abort promptly
+    try { this.abortControllers.set(task.id, controller); } catch {}
     const response = await this.openai.chat.completions.create({
       model: this.deploymentName,
       messages: messages,
@@ -504,6 +540,8 @@ ${context}`
       tool_choice: 'auto',
       max_tokens: 1000,
       temperature: 0.1
+    }, { signal: controller.signal, timeout: this.openAITimeoutMs }).finally(() => {
+      this.abortControllers.delete(task.id);
     });
 
     return response;
@@ -513,7 +551,7 @@ ${context}`
   async getStructuredPageContext() {
     await this.initializeBrowser();
     if (!this.page) return {};
-    const res = await this.page.evaluate(() => {
+    const res = await this._withTimeout(this.page.evaluate(() => {
       const clamp = (s, n=160) => (s||'').trim().replace(/\s+/g,' ').slice(0,n);
       const isVisible = (el) => {
         const style = window.getComputedStyle(el);
@@ -596,7 +634,7 @@ ${context}`
         visibleTextSample: sample,
         viewport: { width: window.innerWidth, height: window.innerHeight }
       };
-    });
+    }), 2000, 'structuredPageContext').catch(() => ({}));
     return res;
   }
 
@@ -916,10 +954,11 @@ ${context}`
       throw new Error('Browser page not initialized');
     }
 
-    const screenshot = await this.page.screenshot({
-      type: 'png',
-      fullPage: false
-    });
+    const screenshot = await this._withTimeout(
+      this.page.screenshot({ type: 'png', fullPage: false, timeout: 7000 }),
+      8000,
+      'screenshot'
+    );
 
     return screenshot.toString('base64');
   }
@@ -951,5 +990,22 @@ ${context}`
       this.page = null;
       this.cdpClient = null;
     }
+  }
+
+  // Generic timeout wrapper to prevent hangs
+  _withTimeout(promise, ms, label = 'op') {
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const t = setTimeout(() => {
+        if (done) return;
+        done = true;
+        const err = new Error(`${label} timed out after ${ms}ms`);
+        err.code = 'ETIMEDOUT';
+        reject(err);
+      }, ms);
+      Promise.resolve(typeof promise === 'function' ? promise() : promise)
+        .then((v) => { if (!done) { done = true; clearTimeout(t); resolve(v); } })
+        .catch((e) => { if (!done) { done = true; clearTimeout(t); reject(e); } });
+    });
   }
 }

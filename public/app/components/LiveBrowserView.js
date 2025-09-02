@@ -47,20 +47,26 @@ export function LiveBrowserView() {
         await fetch(`/api/tasks/${currentTask.id}/${manual ? 'pause' : 'resume'}`, { method: 'POST' });
       } catch {}
     }
+    // Also signal over WS for immediate pause/takeover
+    if (manual && socket && socket.readyState === WebSocket.OPEN && currentTask?.id) {
+      try { socket.send(JSON.stringify({ type: 'userTakeover', taskId: currentTask.id })); } catch {}
+    }
   frame.classList.toggle('manual', manual);
   chromeBar.classList.toggle('invisible', !manual);
   chromeBar.classList.toggle('pointer-events-none', !manual);
   cursor.style.display = manual ? 'block' : 'none';
   // Start/stop streaming tied to manual mode
   if (manual) {
-    if (socket && socket.readyState === WebSocket.OPEN) {
+    if (!streamRequested && socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'startScreencast', taskId: currentTask?.id }));
+      streamRequested = true;
     }
   } else {
-    if (socket && socket.readyState === WebSocket.OPEN) {
+    if (streamRequested && socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'stopScreencast' }));
     }
     streamActive = false;
+    streamRequested = false;
   }
   if (manual) {
     // Poll page state while in manual mode to keep url/title fresh
@@ -339,13 +345,17 @@ export function LiveBrowserView() {
   // Streaming state & helpers
   let socket = null;
   let streamActive = false;
+  let streamRequested = false;
   let lastMeta = { deviceWidth: 0, deviceHeight: 0 };
 
   function setSocket(ws) {
     socket = ws;
     // If manual control is on when socket connects/reconnects, ensure stream starts
     if (manual && currentTask && socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'startScreencast', taskId: currentTask.id }));
+      if (!streamRequested) {
+        socket.send(JSON.stringify({ type: 'startScreencast', taskId: currentTask.id }));
+        streamRequested = true;
+      }
     }
   }
 
@@ -388,6 +398,7 @@ export function LiveBrowserView() {
     if (!frameData || !frameData.data) return;
     const { data, metadata, format } = frameData;
     streamActive = true;
+    streamRequested = true;
     const mime = format === 'jpeg' ? 'image/jpeg' : 'image/png';
     const src = `data:${mime};base64,${data}`;
     // Keep <img> in sync for download/open buttons
