@@ -4,9 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun run server/index.js",
-    "build": "rm -rf dist && mkdir -p dist/public && cp -r public/* dist/public/ && bun build public/app/main.js --outdir dist/public/app --target browser",
-    "start": "NODE_ENV=production bun run server/index.js",
+    "dev": "tsc && bun run dist/server/index.js",
+    "build": "tsc && rm -rf dist/public && mkdir -p dist/public && cp -r public/* dist/public/ && bun build dist/public/app/main.js --outdir dist/public/app --target browser",
+    "build:ts": "tsc",
+    "start": "NODE_ENV=production tsc && bun run dist/server/index.js",
     "setup": "bun run setup.js",
     "test": "bun run test.js"
   },
@@ -25,6 +26,9 @@
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/ws": "^8.5.10",
-    "@types/uuid": "^9.0.7"
+    "@types/uuid": "^9.0.7",
+    "@types/node": "^20.10.0",
+    "@types/cors": "^2.8.17",
+    "typescript": "^5.3.0"
   }
 }
