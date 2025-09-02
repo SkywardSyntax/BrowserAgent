@@ -20,7 +20,7 @@ const browserAgent = new BrowserAgent(taskManager);
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static(process.env.NODE_ENV === 'production' ? 'dist/public' : 'public'));
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -290,6 +290,29 @@ wss.on('connection', (ws) => {
             ws.send(JSON.stringify({ type: 'screencastStopped' }));
           }
           break;
+
+        case 'input': {
+          // Low-latency manual input path: execute action without forcing a screenshot response
+          (async () => {
+            try {
+              const { taskId, action } = data;
+              if (!taskId || !action) return;
+              const task = taskManager.getTask(taskId);
+              if (!task) return;
+              await browserAgent.initializeBrowser();
+              await browserAgent.executeBrowserAction(taskId, action);
+              // Optionally emit a small ack to allow client-side debouncing
+              if (ws.readyState === ws.OPEN) {
+                ws.send(JSON.stringify({ type: 'inputAck', at: Date.now(), action: action.action }));
+              }
+            } catch (e) {
+              try {
+                if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'inputError', error: String(e && e.message || e) }));
+              } catch {}
+            }
+          })();
+          break;
+        }
       }
     } catch (error) {
       console.error('Error handling WebSocket message:', error);

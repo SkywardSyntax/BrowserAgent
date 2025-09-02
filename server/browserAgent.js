@@ -28,6 +28,9 @@ export class BrowserAgent {
     this.displayHeight = parseInt(process.env.DISPLAY_HEIGHT) || 720;
     this.deploymentName = process.env.AZURE_OPENAI_DEPLOYMENT_NAME || 'gpt-4o';
     this.openAITimeoutMs = parseInt(process.env.OPENAI_TIMEOUT_MS || '60000', 10);
+  // Default operation timeouts to avoid hangs
+  this.actionTimeoutMs = parseInt(process.env.ACTION_TIMEOUT_MS || '8000', 10);
+  this.navTimeoutMs = parseInt(process.env.NAV_TIMEOUT_MS || '10000', 10);
 
     // Key mappings for Playwright
     this.keyMap = {
@@ -467,6 +470,8 @@ You can see the current browser state in the screenshot. Use the browser_action 
 Available actions:
 - click: Click on coordinates (x, y)
 - type: Type text at current cursor position
+- pause_task: Pause global task processing (AI loop waits)
+- resume_task: Resume global task processing
 - scroll: Scroll in a direction (up/down/left/right)
 - wheel: Scroll with precise deltas (deltaX/deltaY)
 - key_press: Press a key (Enter, Tab, Escape, etc.)
@@ -495,8 +500,6 @@ Locator spec fields:
 - alt/title/testId: by accessible attributes
 - href: substring to match links by URL
 - exact: boolean for exact text/name match; nth: index for picking among matches
-- pause_task: Pause the global task processing (AI loop waits)
-- resume_task: Resume global task processing
 - task_complete: Mark the task as complete
 
 Important guidelines:
@@ -700,24 +703,25 @@ ${context}`
     };
 
     try {
+      await this.initializeBrowser();
       switch (action.action) {
         case 'click':
           if (action.coordinates) {
             const { x, y } = this.validateCoordinates(action.coordinates.x, action.coordinates.y);
-            await this.page.mouse.click(x, y);
+            await this._withTimeout(() => this.page.mouse.click(x, y), this.actionTimeoutMs, 'click');
           }
           break;
 
         case 'type':
           if (action.text) {
-            await this.page.keyboard.type(action.text);
+            await this._withTimeout(() => this.page.keyboard.type(action.text), this.actionTimeoutMs, 'type');
           }
           break;
 
         case 'key_press':
           if (action.key) {
             const key = this.keyMap[action.key] || action.key;
-            await this.page.keyboard.press(key);
+            await this._withTimeout(() => this.page.keyboard.press(key), this.actionTimeoutMs, 'key_press');
           }
           break;
 
@@ -725,73 +729,87 @@ ${context}`
           const scrollAmount = 300;
           switch (action.scroll_direction) {
             case 'down':
-              await this.page.mouse.wheel(0, scrollAmount);
+              await this._withTimeout(() => this.page.mouse.wheel(0, scrollAmount), this.actionTimeoutMs, 'wheel');
               break;
             case 'up':
-              await this.page.mouse.wheel(0, -scrollAmount);
+              await this._withTimeout(() => this.page.mouse.wheel(0, -scrollAmount), this.actionTimeoutMs, 'wheel');
               break;
             case 'left':
-              await this.page.mouse.wheel(-scrollAmount, 0);
+              await this._withTimeout(() => this.page.mouse.wheel(-scrollAmount, 0), this.actionTimeoutMs, 'wheel');
               break;
             case 'right':
-              await this.page.mouse.wheel(scrollAmount, 0);
+              await this._withTimeout(() => this.page.mouse.wheel(scrollAmount, 0), this.actionTimeoutMs, 'wheel');
               break;
           }
           break;
 
         case 'wheel':
-          await this.page.mouse.wheel(action.deltaX || 0, action.deltaY || 0);
+          await this._withTimeout(() => this.page.mouse.wheel(action.deltaX || 0, action.deltaY || 0), this.actionTimeoutMs, 'wheel');
           break;
 
         case 'navigate':
           if (action.url) {
-            await this.page.goto(action.url);
+            await this._withTimeout(() => this.page.goto(action.url, { timeout: this.navTimeoutMs, waitUntil: 'domcontentloaded' }), this.navTimeoutMs + 1000, 'navigate');
           }
           break;
 
         case 'reload':
-          await this.page.reload();
+          await this._withTimeout(() => this.page.reload({ timeout: this.navTimeoutMs, waitUntil: 'domcontentloaded' }), this.navTimeoutMs + 1000, 'reload');
           break;
 
         case 'go_back':
-          await this.page.goBack();
+          await this._withTimeout(() => this.page.goBack({ timeout: this.navTimeoutMs, waitUntil: 'domcontentloaded' }), this.navTimeoutMs + 1000, 'go_back');
           break;
 
         case 'go_forward':
-          await this.page.goForward();
+          await this._withTimeout(() => this.page.goForward({ timeout: this.navTimeoutMs, waitUntil: 'domcontentloaded' }), this.navTimeoutMs + 1000, 'go_forward');
           break;
 
         case 'wait':
           const waitTime = action.wait_ms || 1000;
-          await this.delay(waitTime);
+          await this.delay(Math.min(waitTime, this.actionTimeoutMs));
           break;
 
         // Element-targeted actions
         case 'click_element': {
           const locator = await this.resolveLocator(action.locator);
-          await withRetry(() => locator.click({ timeout: action.timeout_ms || 5000 }));
+          const t = Math.min(action.timeout_ms || this.actionTimeoutMs, this.actionTimeoutMs * 2);
+          await withRetry(() => locator.click({ timeout: t }));
           break;
         }
 
         case 'fill_field': {
           if (action.text === undefined) throw new Error('fill_field requires text');
-          const locator = await this.resolveLocator(action.locator);
+          // Try to ensure page is interactive (dismiss common overlays)
+          await this._ensurePageReady().catch(() => {});
+          let locator = await this.resolveLocator(action.locator).catch(() => null);
+          const t = Math.min(action.timeout_ms || this.actionTimeoutMs, this.actionTimeoutMs * 2);
           await withRetry(async () => {
-            await locator.fill('');
-            await locator.fill(action.text, { timeout: action.timeout_ms || 5000 });
-          });
+            if (!locator) {
+              // Attempt fallback for common input patterns if resolution failed
+              locator = await this._fallbackInputLocator(action.locator, t).catch(() => null);
+            }
+            if (!locator) throw new Error('Input locator not found');
+            await locator.scrollIntoViewIfNeeded().catch(() => {});
+            await locator.waitFor({ state: 'visible', timeout: t }).catch(() => {});
+            await locator.click({ timeout: t }).catch(() => {});
+            await locator.fill('', { timeout: t }).catch(() => {});
+            await locator.fill(action.text, { timeout: t });
+          }, { retries: 2, delayMs: 300 });
           break;
         }
 
         case 'hover_element': {
           const locator = await this.resolveLocator(action.locator);
-          await withRetry(() => locator.hover({ timeout: action.timeout_ms || 5000 }));
+          const t = Math.min(action.timeout_ms || this.actionTimeoutMs, this.actionTimeoutMs * 2);
+          await withRetry(() => locator.hover({ timeout: t }));
           break;
         }
 
         case 'focus_element': {
           const locator = await this.resolveLocator(action.locator);
-          await withRetry(() => locator.focus({ timeout: action.timeout_ms || 5000 }));
+          const t = Math.min(action.timeout_ms || this.actionTimeoutMs, this.actionTimeoutMs * 2);
+          await withRetry(() => locator.focus({ timeout: t }));
           break;
         }
 
@@ -799,7 +817,8 @@ ${context}`
           if (!action.key) throw new Error('press_on requires key');
           const locator = await this.resolveLocator(action.locator);
           const key = this.keyMap[action.key] || action.key;
-          await withRetry(() => locator.press(key, { timeout: action.timeout_ms || 5000 }));
+          const t = Math.min(action.timeout_ms || this.actionTimeoutMs, this.actionTimeoutMs * 2);
+          await withRetry(() => locator.press(key, { timeout: t }));
           break;
         }
 
@@ -811,12 +830,13 @@ ${context}`
 
         case 'select_option': {
           const locator = await this.resolveLocator(action.locator);
+          const t = Math.min(action.timeout_ms || this.actionTimeoutMs, this.actionTimeoutMs * 2);
           await withRetry(async () => {
             if (action.option_value) {
-              await locator.selectOption(Array.isArray(action.option_value) ? action.option_value : { value: action.option_value });
+              await locator.selectOption(Array.isArray(action.option_value) ? action.option_value : { value: action.option_value }, { timeout: t });
             } else if (action.option_label) {
               const labels = Array.isArray(action.option_label) ? action.option_label : [action.option_label];
-              await locator.selectOption(labels.map(l => ({ label: l })));
+              await locator.selectOption(labels.map(l => ({ label: l })), { timeout: t });
             } else {
               throw new Error('select_option requires option_value or option_label');
             }
@@ -827,14 +847,16 @@ ${context}`
         // Assertions and waits
         case 'assert_visible': {
           const locator = await this.resolveLocator(action.locator);
-          await locator.waitFor({ state: 'visible', timeout: action.timeout_ms || 5000 });
+          const t = Math.min(action.timeout_ms || this.actionTimeoutMs, this.actionTimeoutMs * 2);
+          await locator.waitFor({ state: 'visible', timeout: t });
           break;
         }
 
         case 'assert_text': {
           const locator = await this.resolveLocator(action.locator);
           if (!action.expected) throw new Error('assert_text requires expected');
-          const txt = (await locator.first().innerText({ timeout: action.timeout_ms || 5000 })).trim();
+          const t = Math.min(action.timeout_ms || this.actionTimeoutMs, this.actionTimeoutMs * 2);
+          const txt = (await locator.first().innerText({ timeout: t })).trim();
           const match = action.exact ? (txt === action.expected) : txt.includes(action.expected);
           if (!match) throw new Error(`Text assertion failed. Expected ${action.exact ? 'exact' : 'contains'} "${action.expected}", got "${txt}"`);
           break;
@@ -857,7 +879,8 @@ ${context}`
         case 'wait_for_element': {
           const locator = await this.resolveLocator(action.locator);
           const state = action.state || 'visible';
-          await locator.first().waitFor({ state, timeout: action.timeout_ms || 8000 });
+          const t = Math.min(action.timeout_ms || this.actionTimeoutMs, this.actionTimeoutMs * 2);
+          await locator.first().waitFor({ state, timeout: t });
           break;
         }
 
@@ -865,21 +888,21 @@ ${context}`
           const btn = action.button || 'left';
           let x = 0, y = 0;
           if (action.coordinates) ({ x, y } = this.validateCoordinates(action.coordinates.x, action.coordinates.y));
-          if (typeof x === 'number' && typeof y === 'number') await this.page.mouse.move(x, y);
-          await this.page.mouse.down({ button: btn });
+          if (typeof x === 'number' && typeof y === 'number') await this._withTimeout(() => this.page.mouse.move(x, y), this.actionTimeoutMs, 'mouse_move');
+          await this._withTimeout(() => this.page.mouse.down({ button: btn }), this.actionTimeoutMs, 'mouse_down');
           break;
         }
 
         case 'mouse_up': {
           const btn = action.button || 'left';
-          await this.page.mouse.up({ button: btn });
+          await this._withTimeout(() => this.page.mouse.up({ button: btn }), this.actionTimeoutMs, 'mouse_up');
           break;
         }
 
         case 'mouse_move': {
           if (action.coordinates) {
             const { x, y } = this.validateCoordinates(action.coordinates.x, action.coordinates.y);
-            await this.page.mouse.move(x, y, { steps: 1 });
+            await this._withTimeout(() => this.page.mouse.move(x, y, { steps: 1 }), this.actionTimeoutMs, 'mouse_move');
           }
           break;
         }
@@ -938,7 +961,7 @@ ${context}`
 
     if (!locator) throw new Error('Unable to construct locator from spec');
     if (typeof spec.nth === 'number') locator = locator.nth(spec.nth);
-    await locator.first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+    await locator.first().waitFor({ state: 'attached', timeout: Math.min(spec.timeout_ms || this.actionTimeoutMs, this.actionTimeoutMs * 2) }).catch(() => {});
     return locator.first();
   }
 
@@ -1007,5 +1030,78 @@ ${context}`
         .then((v) => { if (!done) { done = true; clearTimeout(t); resolve(v); } })
         .catch((e) => { if (!done) { done = true; clearTimeout(t); reject(e); } });
     });
+  }
+
+  // Heuristics to ensure page is ready for interaction (dismiss overlays/consent)
+  async _ensurePageReady() {
+    await this.initializeBrowser();
+    if (!this.page) return;
+    // If on bing.com, dismiss consent if present
+    try {
+      const url = this.page.url();
+      if (/\.bing\./i.test(url)) {
+        // Try multiple known consent/selectors
+        const selectors = [
+          '#bnp_btn_accept',
+          'button#bnp_btn_accept',
+          'button[aria-label*="Accept"]',
+          'button:has-text("Accept")',
+          'button[role="button"]:has-text("Accept")'
+        ];
+        for (const sel of selectors) {
+          const btn = this.page.locator(sel).first();
+          if (await btn.count().catch(() => 0)) {
+            const vis = await btn.isVisible().catch(() => false);
+            if (vis) { await btn.click({ timeout: 1000 }).catch(() => {}); break; }
+          }
+        }
+      }
+    } catch {}
+    // Wait a brief moment for DOM to settle
+    await this._withTimeout(() => this.page.waitForLoadState('domcontentloaded', { timeout: 2000 }), 2200, 'wait_dom').catch(() => {});
+  }
+
+  // Fallback locator resolution for common input use-cases
+  async _fallbackInputLocator(spec = {}, timeoutMs = 5000) {
+    await this.initializeBrowser();
+    const page = this.page;
+    const exact = !!(spec && spec.exact);
+    const candidates = [];
+    // If role=searchbox, try common search inputs
+    if (spec && /searchbox/i.test(spec.role || '')) {
+      candidates.push('input[role="searchbox"]');
+      candidates.push('input[type="search"]');
+      candidates.push('input[name="q"]');
+      candidates.push('input[name="p"]');
+      candidates.push('input#sb_form_q'); // Bing
+      candidates.push('textarea[role="searchbox"]');
+    }
+    // Also try by placeholder/label if provided
+    if (spec && spec.placeholder) {
+      candidates.push(`input[placeholder*="${spec.placeholder}"]`);
+      candidates.push(`textarea[placeholder*="${spec.placeholder}"]`);
+    }
+    if (spec && spec.label) {
+      try {
+        const labelLoc = page.getByLabel(spec.label, { exact });
+        await labelLoc.first().waitFor({ state: 'attached', timeout: 800 }).catch(() => {});
+        if (await labelLoc.count().catch(() => 0)) return labelLoc.first();
+      } catch {}
+    }
+    for (const sel of candidates) {
+      try {
+        const loc = page.locator(sel).first();
+        await loc.waitFor({ state: 'attached', timeout: 800 }).catch(() => {});
+        if (await loc.count().catch(() => 0)) return loc;
+      } catch {}
+    }
+    // As a last resort, the first visible text input
+    try {
+      const any = page.locator('input[type="text"], input:not([type]), textarea').filter({ hasNot: page.locator('[disabled]') }).first();
+      await any.waitFor({ state: 'visible', timeout: 800 }).catch(() => {});
+      if (await any.count().catch(() => 0)) return any;
+    } catch {}
+    // None found
+    throw new Error('No fallback input found');
   }
 }
