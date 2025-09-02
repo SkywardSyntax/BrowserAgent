@@ -137,6 +137,8 @@ class App {
         if (this.state.currentTask) {
           this.ws.send(JSON.stringify({ type: 'subscribe', taskId: this.state.currentTask.id }));
         }
+        // Give live view WS reference for any direct needs
+        if (this.liveView && this.liveView.setSocket) this.liveView.setSocket(this.ws);
       });
       this.ws.addEventListener('message', (ev) => {
         try {
@@ -147,6 +149,11 @@ class App {
             }
             // Sidebar stays in sync
             this.refreshSidebar();
+          } else if (msg.type === 'screencastFrame') {
+            // Forward to live view to render
+            if (this.liveView && this.liveView.drawFrame) this.liveView.drawFrame(msg.frame);
+          } else if (msg.type === 'screencastError') {
+            console.warn('Screencast error:', msg.error);
           }
         } catch {}
       });
@@ -187,6 +194,10 @@ class App {
     if (this.liveView && this.liveView.setTask) this.liveView.setTask(task);
     const last = (task.screenshots || [])[task.screenshots.length - 1];
     if (last) this.liveView.update(last.data);
+    // Keep subscription; screencast is driven by manual control only
+    if (this.ws && this.ws.readyState === WebSocket.OPEN && task && task.id) {
+      this.ws.send(JSON.stringify({ type: 'subscribe', taskId: task.id }));
+    }
   }
 
   async refreshSidebar() {
@@ -205,4 +216,3 @@ document.addEventListener('DOMContentLoaded', () => {
   const root = document.getElementById('app');
   new App(root);
 });
-

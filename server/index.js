@@ -259,6 +259,36 @@ wss.on('connection', (ws) => {
             }));
           }
           break;
+
+        case 'startScreencast':
+          (async () => {
+            try {
+              // Create a per-WS streaming subscription
+              if (ws._stopStream) {
+                ws._stopStream();
+                ws._stopStream = null;
+              }
+              // Ensure browser is up
+              await browserAgent.initializeBrowser();
+              ws._stopStream = await browserAgent.addScreencastListener((frame) => {
+                // Guard if ws is closed
+                if (ws.readyState !== ws.OPEN) return;
+                ws.send(JSON.stringify({ type: 'screencastFrame', frame }));
+              });
+              ws.send(JSON.stringify({ type: 'screencastStarted' }));
+            } catch (e) {
+              ws.send(JSON.stringify({ type: 'screencastError', error: String(e && e.message || e) }));
+            }
+          })();
+          break;
+
+        case 'stopScreencast':
+          if (ws._stopStream) {
+            ws._stopStream();
+            ws._stopStream = null;
+            ws.send(JSON.stringify({ type: 'screencastStopped' }));
+          }
+          break;
       }
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
@@ -268,6 +298,10 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     console.log('WebSocket client disconnected');
     unsubscribe();
+    if (ws._stopStream) {
+      try { ws._stopStream(); } catch {}
+      ws._stopStream = null;
+    }
   });
 });
 

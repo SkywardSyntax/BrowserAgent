@@ -145,6 +145,7 @@ body {
 @keyframes float1 { from { transform: translate(0,0); } to { transform: translate(30px, 20px); } }
 @keyframes float2 { from { transform: translate(0,0); } to { transform: translate(-25px, -30px); } }
 .live img { width: 100%; height: auto; display: block; background: #0b0f17; }
+.live canvas { width: 100%; height: auto; display: block; background: #0b0f17; }
 /* Remote cursor indicator */
 .remote-cursor { position: absolute; width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,.95); box-shadow: 0 0 0 2px rgba(0,0,0,.45); pointer-events: none; transform: translate(-50%, -50%); z-index: 30; transition: transform .05s linear, opacity .12s ease; opacity: 0; }
 /* Click pulse feedback */

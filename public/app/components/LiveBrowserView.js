@@ -48,8 +48,20 @@ export function LiveBrowserView() {
       } catch {}
     }
   frame.classList.toggle('manual', manual);
-  chromeBar.classList.toggle('hidden', !manual);
+  chromeBar.classList.toggle('invisible', !manual);
+  chromeBar.classList.toggle('pointer-events-none', !manual);
   cursor.style.display = manual ? 'block' : 'none';
+  // Start/stop streaming tied to manual mode
+  if (manual) {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'startScreencast', taskId: currentTask?.id }));
+    }
+  } else {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'stopScreencast' }));
+    }
+    streamActive = false;
+  }
   if (manual) {
     // Poll page state while in manual mode to keep url/title fresh
     const fetchState = async () => {
@@ -120,6 +132,12 @@ export function LiveBrowserView() {
   backdrop.className = 'backdrop';
   const img = document.createElement('img');
   img.alt = 'Live browser view';
+  // Canvas for live stream frames
+  const canvas = document.createElement('canvas');
+  canvas.style.width = '100%';
+  canvas.style.height = 'auto';
+  canvas.style.display = 'block';
+  const ctx = canvas.getContext('2d');
   // Tailwind-powered overlay to avoid relying on :has and ensure full coverage
   const overlay = document.createElement('div');
   overlay.className = 'absolute inset-0 z-10 grid place-items-center text-white/85 font-medium text-[14px]';
@@ -131,11 +149,12 @@ export function LiveBrowserView() {
   cursor.className = 'remote-cursor';
   cursor.style.display = 'none';
 
-  frame.append(backdrop, img, overlay, cursor);
+  frame.append(backdrop, canvas, img, overlay, cursor);
 
   // Manual control chrome (now OUTSIDE the browser image to avoid covering content)
   const chromeBar = document.createElement('div');
-  chromeBar.className = 'mt-2 hidden';
+  // Reserve space even when invisible to avoid layout shift
+  chromeBar.className = 'mt-2 invisible pointer-events-none';
   chromeBar.innerHTML = `
     <div class="mx-1 rounded-xl border border-white/10 bg-black/30 backdrop-blur-md shadow-md">
       <div class="flex items-center gap-2 px-3 py-2 flex-wrap">
@@ -193,12 +212,14 @@ export function LiveBrowserView() {
 
   // Manual control handlers
   frame.addEventListener('click', async (ev) => {
-    if (!manual || !currentTask || !img || !img.naturalWidth) return;
-    const rect = img.getBoundingClientRect();
+    if (!manual || !currentTask) return;
+    const targetEl = streamActive ? canvas : img;
+    const rect = targetEl.getBoundingClientRect();
     const relX = (ev.clientX - rect.left) / rect.width;
     const relY = (ev.clientY - rect.top) / rect.height;
     // Map to viewport coordinates
-    const vw = img.naturalWidth; const vh = img.naturalHeight;
+    const vw = streamActive ? (lastMeta.deviceWidth || canvas.width) : (img.naturalWidth || rect.width);
+    const vh = streamActive ? (lastMeta.deviceHeight || canvas.height) : (img.naturalHeight || rect.height);
     const x = Math.round(relX * vw);
     const y = Math.round(relY * vh);
     // Click ripple feedback
@@ -208,8 +229,9 @@ export function LiveBrowserView() {
 
   // Move remote cursor indicator
   frame.addEventListener('mousemove', (ev) => {
-    if (!manual || !img || !img.naturalWidth) return;
-    const rect = img.getBoundingClientRect();
+    if (!manual) return;
+    const targetEl = streamActive ? canvas : img;
+    const rect = targetEl.getBoundingClientRect();
     const relX = (ev.clientX - rect.left) / rect.width;
     const relY = (ev.clientY - rect.top) / rect.height;
     // Keep within bounds
@@ -224,6 +246,59 @@ export function LiveBrowserView() {
     cursor.style.transform = `translate(${x}px, ${y}px)`;
   });
 
+  // Low-level mouse interactions for drag/select
+  let isMouseDown = false;
+  let lastMoveAt = 0;
+  frame.addEventListener('mousedown', async (ev) => {
+    if (!manual || !currentTask) return;
+    ev.preventDefault();
+    const targetEl = streamActive ? canvas : img;
+    const rect = targetEl.getBoundingClientRect();
+    const relX = (ev.clientX - rect.left) / rect.width;
+    const relY = (ev.clientY - rect.top) / rect.height;
+    const vw = streamActive ? (lastMeta.deviceWidth || canvas.width) : (img.naturalWidth || rect.width);
+    const vh = streamActive ? (lastMeta.deviceHeight || canvas.height) : (img.naturalHeight || rect.height);
+    const x = Math.round(relX * vw);
+    const y = Math.round(relY * vh);
+    isMouseDown = true;
+    const button = ev.button === 2 ? 'right' : ev.button === 1 ? 'middle' : 'left';
+    await sendAction({ action: 'mouse_down', button, coordinates: { x, y }, reason: 'User mouse down' });
+  });
+  frame.addEventListener('mouseup', async (ev) => {
+    if (!manual || !currentTask) return;
+    ev.preventDefault();
+    isMouseDown = false;
+    const button = ev.button === 2 ? 'right' : ev.button === 1 ? 'middle' : 'left';
+    await sendAction({ action: 'mouse_up', button, reason: 'User mouse up' });
+  });
+  frame.addEventListener('contextmenu', (ev) => {
+    if (!manual) return;
+    ev.preventDefault();
+  });
+  frame.addEventListener('mouseleave', async () => {
+    if (!manual || !currentTask) return;
+    if (isMouseDown) {
+      isMouseDown = false;
+      await sendAction({ action: 'mouse_up', button: 'left', reason: 'Mouse leave' });
+    }
+  });
+  frame.addEventListener('mousemove', async (ev) => {
+    if (!manual || !currentTask) return;
+    if (!isMouseDown) return;
+    const now = Date.now();
+    if (now - lastMoveAt < 30) return; // throttle moves
+    lastMoveAt = now;
+    const targetEl = streamActive ? canvas : img;
+    const rect = targetEl.getBoundingClientRect();
+    const relX = (ev.clientX - rect.left) / rect.width;
+    const relY = (ev.clientY - rect.top) / rect.height;
+    const vw = streamActive ? (lastMeta.deviceWidth || canvas.width) : (img.naturalWidth || rect.width);
+    const vh = streamActive ? (lastMeta.deviceHeight || canvas.height) : (img.naturalHeight || rect.height);
+    const x = Math.round(relX * vw);
+    const y = Math.round(relY * vh);
+    await sendAction({ action: 'mouse_move', coordinates: { x, y }, reason: 'User mouse move (drag)' });
+  });
+
   // Scroll -> send wheel actions
   let lastWheel = 0;
   frame.addEventListener('wheel', async (ev) => {
@@ -232,8 +307,8 @@ export function LiveBrowserView() {
     const now = Date.now();
     if (now - lastWheel < 120) return; // throttle
     lastWheel = now;
-    const direction = ev.deltaY > 0 ? 'down' : 'up';
-    await sendAction({ action: 'scroll', scroll_direction: direction, reason: 'User wheel scroll' });
+    // Send precise deltas for smoother scrolling
+    await sendAction({ action: 'wheel', deltaX: ev.deltaX || 0, deltaY: ev.deltaY || 0, reason: 'User wheel scroll' });
   }, { passive: false });
 
   window.addEventListener('keydown', async (ev) => {
@@ -255,11 +330,24 @@ export function LiveBrowserView() {
       const res = await fetch(`/api/tasks/${currentTask.id}/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(action) });
       if (!res.ok) return;
       const data = await res.json();
-      if (data && data.screenshot) update(data.screenshot);
+      if (data && data.screenshot && !streamActive) update(data.screenshot);
     } catch {}
   }
 
   wrap.append(toolbar, frame, chromeBar);
+
+  // Streaming state & helpers
+  let socket = null;
+  let streamActive = false;
+  let lastMeta = { deviceWidth: 0, deviceHeight: 0 };
+
+  function setSocket(ws) {
+    socket = ws;
+    // If manual control is on when socket connects/reconnects, ensure stream starts
+    if (manual && currentTask && socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'startScreencast', taskId: currentTask.id }));
+    }
+  }
 
   function blobToBase64(blob) {
     return new Promise((resolve) => {
@@ -278,6 +366,10 @@ export function LiveBrowserView() {
     refresh.disabled = !task || !task.id;
     openNew.disabled = !task || !task.id;
     control.disabled = !task || !task.id;
+    // If manual mode is active and a task is set/switched, ensure stream is active for current task
+    if (manual && socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'startScreencast', taskId: task.id }));
+    }
   }
 
   function update(base64Png) {
@@ -291,6 +383,32 @@ export function LiveBrowserView() {
     last.textContent = `Updated ${new Date().toLocaleTimeString()}`;
   }
 
+  // Draw a live frame (JPEG/PNG) onto the canvas
+  function drawFrame(frameData) {
+    if (!frameData || !frameData.data) return;
+    const { data, metadata, format } = frameData;
+    streamActive = true;
+    const mime = format === 'jpeg' ? 'image/jpeg' : 'image/png';
+    const src = `data:${mime};base64,${data}`;
+    // Keep <img> in sync for download/open buttons
+    img.src = src;
+    const image = new Image();
+    image.onload = () => {
+      const w = (metadata && (metadata.deviceWidth || image.naturalWidth)) || image.naturalWidth;
+      const h = (metadata && (metadata.deviceHeight || image.naturalHeight)) || image.naturalHeight;
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      ctx.drawImage(image, 0, 0, w, h);
+      lastMeta = { deviceWidth: w, deviceHeight: h };
+      const ov = frame.querySelector('.absolute.inset-0');
+      if (ov) ov.classList.add('hidden');
+      last.textContent = `Live ${new Date().toLocaleTimeString()}`;
+    };
+    image.src = src;
+  }
+
   // Pulse animation at click point
   function createClickPulse(clientX, clientY) {
     const rect = frame.getBoundingClientRect();
@@ -302,7 +420,7 @@ export function LiveBrowserView() {
     setTimeout(() => dot.remove(), 600);
   }
 
-  return Object.assign(wrap, { update, setTask });
+  return Object.assign(wrap, { update, setTask, setSocket, drawFrame });
 
   // Helpers
   function urlsMatch(a, b) {
