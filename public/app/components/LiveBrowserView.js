@@ -34,6 +34,9 @@ export function LiveBrowserView() {
   let currentTask = null;
   let manual = false;
   let chromeInterval = null;
+  // Address bar editing state & pending navigation tracking
+  let isEditingAddr = false;
+  let pendingNavUrl = null;
 
   const control = btn('Take Control', 'Temporarily take manual control of the browser', async () => {
     manual = !manual;
@@ -54,7 +57,19 @@ export function LiveBrowserView() {
         const res = await fetch('/api/page-state');
         if (!res.ok) return;
         const data = await res.json();
-        addrInput.value = data.url || '';
+        // Only update the address bar if the user isn't editing
+        // and either there's no pending navigation or the browser has reached it
+        const nextUrl = data.url || '';
+        if (!isEditingAddr) {
+          if (pendingNavUrl) {
+            if (urlsMatch(nextUrl, pendingNavUrl)) {
+              addrInput.value = nextUrl;
+              pendingNavUrl = null; // navigation reached, clear pending
+            } // else: keep user's pending value visible
+          } else {
+            addrInput.value = nextUrl;
+          }
+        }
         tabTitle.textContent = data.title || 'New Tab';
       } catch {}
     };
@@ -163,9 +178,18 @@ export function LiveBrowserView() {
       if (!url) return;
       const hasProto = /^https?:\/\//i.test(url);
       const finalUrl = hasProto ? url : `https://${url}`;
+      // Mark pending navigation so polling won't clobber the user's value
+      pendingNavUrl = finalUrl;
+      // Stop editing state on commit
+      isEditingAddr = false;
+      addrInput.blur();
       await sendAction({ action: 'navigate', url: finalUrl, reason: 'User navigated via address bar' });
     }
   });
+  // Editing lock: don't clobber while the user types or focuses the field
+  addrInput?.addEventListener('focus', () => { isEditingAddr = true; });
+  addrInput?.addEventListener('input', () => { isEditingAddr = true; });
+  addrInput?.addEventListener('blur', () => { isEditingAddr = false; });
 
   // Manual control handlers
   frame.addEventListener('click', async (ev) => {
@@ -279,4 +303,26 @@ export function LiveBrowserView() {
   }
 
   return Object.assign(wrap, { update, setTask });
+
+  // Helpers
+  function urlsMatch(a, b) {
+    // Simple normalization: trim, ensure protocol for compare, and drop trailing slash
+    const norm = (u) => {
+      if (!u) return '';
+      let s = String(u).trim();
+      if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
+      try {
+        const uo = new URL(s);
+        // Lowercase protocol/host; keep pathname/query for accuracy
+        const host = uo.host.toLowerCase();
+        const proto = uo.protocol.toLowerCase();
+        // Remove trailing slash from pathname for compare
+        const path = uo.pathname.replace(/\/+$/, '');
+        return `${proto}//${host}${path}${uo.search}${uo.hash}`;
+      } catch {
+        return s.replace(/\/+$/, '');
+      }
+    };
+    return norm(a) === norm(b);
+  }
 }
