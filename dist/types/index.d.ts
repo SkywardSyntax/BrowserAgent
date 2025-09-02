@@ -79,7 +79,7 @@ export interface ScreencastMetadata {
     timestamp: number;
 }
 export interface HTMLElementWithProps extends HTMLElement {
-    update?: (data: any) => void;
+    update?: (data: any, currentTaskId?: any) => void;
     setTask?: (task: Task | null) => void;
     setSocket?: (socket: WebSocket | null) => void;
     drawFrame?: (frame: string) => void;

@@ -23,12 +23,14 @@
     "resolveJsonModule": true
   },
   "include": [
-    "src/**/*"
+    "src/server/**/*",
+    "src/types/**/*"
   ],
   "exclude": [
     "node_modules",
     "dist",
     "public",
-    "server"
+    "server",
+    "src/public"
   ]
 }

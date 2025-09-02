@@ -1,13 +1,14 @@
-// public/app/state/session.js
+// src/public/app/state/session.ts
 class Session {
-  constructor() {
-    this.id = null;
+  _id = null;
+  get id() {
+    return this._id;
   }
   async ensure() {
     const stored = localStorage.getItem("sessionId");
     if (stored) {
-      this.id = stored;
-      return this.id;
+      this._id = stored;
+      return this._id;
     }
     const rnd = (n) => crypto.getRandomValues(new Uint8Array(n));
     const toHex = (buf) => Array.from(buf).map((b2) => b2.toString(16).padStart(2, "0")).join("");
@@ -15,9 +16,9 @@ class Session {
     b[6] = b[6] & 15 | 64;
     b[8] = b[8] & 63 | 128;
     const hex = toHex(b);
-    this.id = `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}`;
-    localStorage.setItem("sessionId", this.id);
-    return this.id;
+    this._id = `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}`;
+    localStorage.setItem("sessionId", this._id);
+    return this._id;
   }
 }
 
@@ -70,548 +71,6 @@ function TaskInput({ onSubmit }) {
     });
   }
   return wrap;
-}
-
-// public/app/components/LiveBrowserView.js
-function LiveBrowserView() {
-  const wrap = document.createElement("div");
-  wrap.className = "live";
-  const toolbar = document.createElement("div");
-  toolbar.className = "toolbar";
-  const badge = document.createElement("div");
-  badge.className = "badge inline-flex items-center gap-2 px-3 py-1 rounded-full";
-  badge.innerHTML = '<span class="dot inline-block align-middle"></span> <span class="align-middle">Live Browser</span>';
-  const hint = document.createElement("div");
-  hint.className = "muted small subtle text-[12px]";
-  hint.textContent = "Auto-updates as the agent acts";
-  const spacer = document.createElement("div");
-  spacer.style.flex = "1";
-  const last = document.createElement("div");
-  last.className = "muted small subtle";
-  last.style.marginRight = "8px";
-  last.textContent = "";
-  const btn = (label, title, handler) => {
-    const b = document.createElement("button");
-    b.className = "btn";
-    b.textContent = label;
-    if (title)
-      b.title = title;
-    b.addEventListener("click", handler);
-    return b;
-  };
-  let currentTask = null;
-  let manual = false;
-  let chromeInterval = null;
-  let expanded = false;
-  let isEditingAddr = false;
-  let pendingNavUrl = null;
-  const control = btn("Take Control", "Temporarily take manual control of the browser", async () => {
-    manual = !manual;
-    control.textContent = manual ? "Return to AI" : "Take Control";
-    if (currentTask && currentTask.id) {
-      try {
-        await fetch(`/api/tasks/${currentTask.id}/${manual ? "pause" : "resume"}`, { method: "POST" });
-      } catch {}
-    }
-    if (manual && socket && socket.readyState === WebSocket.OPEN && currentTask?.id) {
-      try {
-        socket.send(JSON.stringify({ type: "userTakeover", taskId: currentTask.id }));
-      } catch {}
-    }
-    frame.classList.toggle("manual", manual);
-    chromeBar.classList.toggle("invisible", !manual);
-    chromeBar.classList.toggle("pointer-events-none", !manual);
-    cursor.style.display = manual ? "block" : "none";
-    if (manual) {
-      if (!streamRequested && socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "startScreencast", taskId: currentTask?.id }));
-        streamRequested = true;
-      }
-    } else {
-      if (streamRequested && socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "stopScreencast" }));
-      }
-      streamActive = false;
-      streamRequested = false;
-      toggleExpanded(false);
-    }
-    if (manual) {
-      const fetchState = async () => {
-        try {
-          const res = await fetch("/api/page-state");
-          if (!res.ok)
-            return;
-          const data = await res.json();
-          const nextUrl = data.url || "";
-          if (!isEditingAddr) {
-            if (pendingNavUrl) {
-              if (urlsMatch(nextUrl, pendingNavUrl)) {
-                addrInput.value = nextUrl;
-                pendingNavUrl = null;
-              }
-            } else {
-              addrInput.value = nextUrl;
-            }
-          }
-          tabTitle.textContent = data.title || "New Tab";
-        } catch {}
-      };
-      await fetchState();
-      chromeInterval = setInterval(fetchState, 1500);
-    } else {
-      if (chromeInterval) {
-        clearInterval(chromeInterval);
-        chromeInterval = null;
-      }
-    }
-  });
-  const refresh = btn("Refresh", "Fetch latest screenshot", async () => {
-    if (!currentTask)
-      return;
-    try {
-      const url = `/api/tasks/${currentTask.id}/screenshot?_=${Date.now()}`;
-      const res = await fetch(url);
-      if (!res.ok)
-        return;
-      const blob = await res.blob();
-      const b64 = await blobToBase64(blob);
-      update(b64);
-    } catch {}
-  });
-  const openNew = btn("Open", "Open latest screenshot in a new tab", () => {
-    if (!currentTask)
-      return;
-    window.open(`/api/tasks/${currentTask.id}/screenshot?_=${Date.now()}`, "_blank");
-  });
-  const download = btn("Download", "Download latest screenshot", async () => {
-    if (!img.src)
-      return;
-    const a = document.createElement("a");
-    a.href = img.src;
-    a.download = `screenshot-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
-    a.click();
-  });
-  const copy = btn("Copy", "Copy image to clipboard", async () => {
-    try {
-      if (!img.src)
-        return;
-      const data = await fetch(img.src);
-      const blob = await data.blob();
-      await navigator.clipboard.write([
-        new ClipboardItem({ "image/png": blob })
-      ]);
-    } catch {}
-  });
-  toolbar.append(badge, hint, spacer, last, refresh, openNew, download, copy, control);
-  const frame = document.createElement("div");
-  frame.className = "frame";
-  frame.style.setProperty("--live-ar", (1280 / 800).toString());
-  const backdrop = document.createElement("div");
-  backdrop.className = "backdrop";
-  const img = document.createElement("img");
-  img.alt = "Live browser view";
-  const canvas = document.createElement("canvas");
-  canvas.style.width = "100%";
-  canvas.style.height = "auto";
-  canvas.style.display = "none";
-  const ctx = canvas.getContext("2d");
-  const overlay = document.createElement("div");
-  overlay.className = "overlay-cta absolute inset-0 z-10 grid place-items-center hidden";
-  overlay.innerHTML = `
-    <div class="overlay-glass">
-      <div class="overlay-center">
-        <div class="overlay-title">Take manual control</div>
-        <div class="overlay-sub">Hover to reveal, click to enter a responsive live session.</div>
-        <button class="overlay-btn" type="button">Take Manual Control</button>
-      </div>
-    </div>`;
-  const overlayBtn = overlay.querySelector(".overlay-btn");
-  overlayBtn?.addEventListener("click", async (e) => {
-    e.stopPropagation();
-    if (!currentTask?.id)
-      return;
-    if (!manual)
-      await control.click();
-    toggleExpanded(true);
-  });
-  const cursor = document.createElement("div");
-  cursor.className = "remote-cursor";
-  cursor.style.display = "none";
-  frame.append(backdrop, canvas, img, overlay, cursor);
-  frame.addEventListener("mouseenter", () => {
-    if (!manual)
-      overlay.classList.remove("hidden");
-  });
-  frame.addEventListener("mouseleave", () => {
-    overlay.classList.add("hidden");
-  });
-  const chromeBar = document.createElement("div");
-  chromeBar.className = "mt-2 invisible pointer-events-none";
-  chromeBar.innerHTML = `
-    <div class="mx-1 rounded-xl border border-white/10 bg-black/30 backdrop-blur-md shadow-md">
-      <div class="flex items-center gap-2 px-3 py-2 flex-wrap">
-        <div class="flex items-center gap-1">
-          <span class="w-2.5 h-2.5 rounded-full bg-red-500/70"></span>
-          <span class="w-2.5 h-2.5 rounded-full bg-yellow-500/70"></span>
-          <span class="w-2.5 h-2.5 rounded-full bg-green-500/70"></span>
-        </div>
-        <div class="is-manual text-[11px] text-white/70 px-2 py-0.5 rounded bg-white/10">Manual</div>
-        <div class="flex items-center gap-1">
-          <button class="nav-back px-2 py-1 text-white/70 hover:text-white">◀</button>
-          <button class="nav-fwd px-2 py-1 text-white/70 hover:text-white">▶</button>
-          <button class="nav-reload px-2 py-1 text-white/70 hover:text-white">⟳</button>
-        </div>
-        <input class="addr flex-1 min-w-[200px] text-[12px] px-3 py-1 rounded-full bg-white/10 text-white placeholder-white/50 outline-none border border-white/15" placeholder="Enter URL and press Enter" />
-        <div class="tab text-[12px] text-white/80 px-2 py-1 rounded bg-white/10 max-w-[40%] truncate"><span class="tab-title">New Tab</span></div>
-      </div>
-    </div>`;
-  const addrInput = chromeBar.querySelector(".addr");
-  const tabTitle = chromeBar.querySelector(".tab-title");
-  const backBtn = chromeBar.querySelector(".nav-back");
-  const fwdBtn = chromeBar.querySelector(".nav-fwd");
-  const reloadBtn = chromeBar.querySelector(".nav-reload");
-  function toggleExpanded(on) {
-    expanded = !!on;
-    document.body.classList.toggle("live-expanded", expanded);
-    wrap.classList.toggle("expanded", expanded);
-    syncTopControls();
-    if (!expanded) {
-      if (socket && socket.readyState === WebSocket.OPEN && streamRequested) {
-        try {
-          socket.send(JSON.stringify({ type: "stopScreencast" }));
-        } catch {}
-      }
-      streamActive = false;
-      streamRequested = false;
-      img.style.display = "block";
-      canvas.style.display = "none";
-    } else {
-      if (manual && socket && socket.readyState === WebSocket.OPEN && currentTask?.id) {
-        try {
-          socket.send(JSON.stringify({ type: "startScreencast", taskId: currentTask.id }));
-          streamRequested = true;
-        } catch {}
-      }
-    }
-  }
-  const giveBack = document.createElement("div");
-  giveBack.className = "overlay-top-controls hidden";
-  giveBack.innerHTML = `<button class="overlay-exit" type="button">Give Agent Control</button>`;
-  const exitBtn = giveBack.querySelector(".overlay-exit");
-  exitBtn?.addEventListener("click", async () => {
-    if (manual)
-      await control.click();
-    toggleExpanded(false);
-  });
-  backBtn?.addEventListener("click", async () => {
-    if (!currentTask)
-      return;
-    await sendAction({ action: "go_back", reason: "User pressed back" });
-  });
-  fwdBtn?.addEventListener("click", async () => {
-    if (!currentTask)
-      return;
-    await sendAction({ action: "go_forward", reason: "User pressed forward" });
-  });
-  reloadBtn?.addEventListener("click", async () => {
-    if (!currentTask)
-      return;
-    await sendAction({ action: "reload", reason: "User pressed reload" });
-  });
-  addrInput?.addEventListener("keydown", async (e) => {
-    if (e.key === "Enter") {
-      const url = (addrInput.value || "").trim();
-      if (!url)
-        return;
-      const hasProto = /^https?:\/\//i.test(url);
-      const finalUrl = hasProto ? url : `https://${url}`;
-      pendingNavUrl = finalUrl;
-      isEditingAddr = false;
-      addrInput.blur();
-      await sendAction({ action: "navigate", url: finalUrl, reason: "User navigated via address bar" });
-    }
-  });
-  addrInput?.addEventListener("focus", () => {
-    isEditingAddr = true;
-  });
-  addrInput?.addEventListener("input", () => {
-    isEditingAddr = true;
-  });
-  addrInput?.addEventListener("blur", () => {
-    isEditingAddr = false;
-  });
-  frame.addEventListener("click", async (ev) => {
-    if (!manual || !currentTask)
-      return;
-    const targetEl = streamActive ? canvas : img;
-    const rect = targetEl.getBoundingClientRect();
-    const relX = (ev.clientX - rect.left) / rect.width;
-    const relY = (ev.clientY - rect.top) / rect.height;
-    const vw = streamActive ? lastMeta.deviceWidth || canvas.width : img.naturalWidth || rect.width;
-    const vh = streamActive ? lastMeta.deviceHeight || canvas.height : img.naturalHeight || rect.height;
-    const x = Math.round(relX * vw);
-    const y = Math.round(relY * vh);
-    createClickPulse(ev.clientX, ev.clientY);
-    await sendAction({ action: "click", coordinates: { x, y }, reason: "User manual click" });
-  });
-  frame.addEventListener("mousemove", (ev) => {
-    if (!manual)
-      return;
-    const targetEl = streamActive ? canvas : img;
-    const rect = targetEl.getBoundingClientRect();
-    const relX = (ev.clientX - rect.left) / rect.width;
-    const relY = (ev.clientY - rect.top) / rect.height;
-    if (relX < 0 || relX > 1 || relY < 0 || relY > 1) {
-      cursor.style.opacity = "0";
-      return;
-    }
-    cursor.style.opacity = "1";
-    const x = ev.clientX - frame.getBoundingClientRect().left;
-    const y = ev.clientY - frame.getBoundingClientRect().top;
-    cursor.style.transform = `translate(${x}px, ${y}px)`;
-  });
-  let isMouseDown = false;
-  let lastMoveAt = 0;
-  frame.addEventListener("mousedown", async (ev) => {
-    if (!manual || !currentTask)
-      return;
-    ev.preventDefault();
-    const targetEl = streamActive ? canvas : img;
-    const rect = targetEl.getBoundingClientRect();
-    const relX = (ev.clientX - rect.left) / rect.width;
-    const relY = (ev.clientY - rect.top) / rect.height;
-    const vw = streamActive ? lastMeta.deviceWidth || canvas.width : img.naturalWidth || rect.width;
-    const vh = streamActive ? lastMeta.deviceHeight || canvas.height : img.naturalHeight || rect.height;
-    const x = Math.round(relX * vw);
-    const y = Math.round(relY * vh);
-    isMouseDown = true;
-    const button = ev.button === 2 ? "right" : ev.button === 1 ? "middle" : "left";
-    await sendAction({ action: "mouse_down", button, coordinates: { x, y }, reason: "User mouse down" });
-  });
-  frame.addEventListener("mouseup", async (ev) => {
-    if (!manual || !currentTask)
-      return;
-    ev.preventDefault();
-    isMouseDown = false;
-    const button = ev.button === 2 ? "right" : ev.button === 1 ? "middle" : "left";
-    await sendAction({ action: "mouse_up", button, reason: "User mouse up" });
-  });
-  frame.addEventListener("contextmenu", (ev) => {
-    if (!manual)
-      return;
-    ev.preventDefault();
-  });
-  frame.addEventListener("mouseleave", async () => {
-    if (!manual || !currentTask)
-      return;
-    if (isMouseDown) {
-      isMouseDown = false;
-      await sendAction({ action: "mouse_up", button: "left", reason: "Mouse leave" });
-    }
-  });
-  frame.addEventListener("mousemove", async (ev) => {
-    if (!manual || !currentTask)
-      return;
-    if (!isMouseDown)
-      return;
-    const now = Date.now();
-    if (now - lastMoveAt < 16)
-      return;
-    lastMoveAt = now;
-    const targetEl = streamActive ? canvas : img;
-    const rect = targetEl.getBoundingClientRect();
-    const relX = (ev.clientX - rect.left) / rect.width;
-    const relY = (ev.clientY - rect.top) / rect.height;
-    const vw = streamActive ? lastMeta.deviceWidth || canvas.width : img.naturalWidth || rect.width;
-    const vh = streamActive ? lastMeta.deviceHeight || canvas.height : img.naturalHeight || rect.height;
-    const x = Math.round(relX * vw);
-    const y = Math.round(relY * vh);
-    await sendAction({ action: "mouse_move", coordinates: { x, y }, reason: "User mouse move (drag)" });
-  });
-  let wheelAccumX = 0;
-  let wheelAccumY = 0;
-  let wheelRaf = null;
-  frame.addEventListener("wheel", (ev) => {
-    if (!manual || !currentTask)
-      return;
-    ev.preventDefault();
-    wheelAccumX += ev.deltaX || 0;
-    wheelAccumY += ev.deltaY || 0;
-    if (!wheelRaf) {
-      wheelRaf = requestAnimationFrame(async () => {
-        const dx = wheelAccumX;
-        const dy = wheelAccumY;
-        wheelAccumX = 0;
-        wheelAccumY = 0;
-        wheelRaf = null;
-        await sendAction({ action: "wheel", deltaX: dx, deltaY: dy, reason: "User wheel scroll" });
-      });
-    }
-  }, { passive: false });
-  window.addEventListener("keydown", async (ev) => {
-    if (!manual || !currentTask)
-      return;
-    const tag = (ev.target && ev.target.tagName || "").toLowerCase();
-    if (tag === "input" || tag === "textarea")
-      return;
-    const key = ev.key;
-    if (key.length === 1) {
-      await sendAction({ action: "type", text: key, reason: "User manual typing" });
-    } else {
-      await sendAction({ action: "key_press", key, reason: "User manual key press" });
-    }
-  });
-  wrap.append(toolbar, giveBack, frame, chromeBar);
-  let socket = null;
-  let streamActive = false;
-  let streamRequested = false;
-  let lastMeta = { deviceWidth: 0, deviceHeight: 0 };
-  function setSocket(ws) {
-    socket = ws;
-    syncTopControls();
-    if (manual && currentTask && socket && socket.readyState === WebSocket.OPEN) {
-      if (!streamRequested) {
-        socket.send(JSON.stringify({ type: "startScreencast", taskId: currentTask.id }));
-        streamRequested = true;
-      }
-    }
-  }
-  function blobToBase64(blob) {
-    return new Promise((resolve) => {
-      const reader = new FileReader;
-      reader.onloadend = () => resolve(reader.result.split(",")[1]);
-      reader.readAsDataURL(blob);
-    });
-  }
-  function setTask(task) {
-    currentTask = task;
-    if (!task) {
-      last.textContent = "";
-      return;
-    }
-    refresh.disabled = !task || !task.id;
-    openNew.disabled = !task || !task.id;
-    control.disabled = !task || !task.id;
-    if (manual && socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: "startScreencast", taskId: task.id }));
-    }
-  }
-  function update(base64Png) {
-    img.src = `data:image/png;base64,${base64Png}`;
-    if (!streamActive) {
-      const ov = frame.querySelector(".overlay-cta");
-      if (ov && !manual)
-        ov.classList.remove("hidden");
-      img.onload = () => {
-        if (ov)
-          ov.classList.add("hidden");
-      };
-      img.style.display = "block";
-      canvas.style.display = "none";
-      img.decode?.().then(() => {
-        const w = img.naturalWidth || 1280;
-        const h = img.naturalHeight || 800;
-        if (w > 0 && h > 0)
-          frame.style.setProperty("--live-ar", (w / h).toString());
-      }).catch(() => {});
-      last.textContent = `Updated ${new Date().toLocaleTimeString()}`;
-    }
-  }
-  let lastSeq = 0;
-  function drawFrame(frameData) {
-    if (!frameData || !frameData.data)
-      return;
-    const { data, metadata, format } = frameData;
-    streamActive = true;
-    streamRequested = true;
-    const mime = format === "jpeg" ? "image/jpeg" : "image/png";
-    const src = `data:${mime};base64,${data}`;
-    img.src = src;
-    img.style.display = "none";
-    canvas.style.display = "block";
-    const seq = ++lastSeq;
-    const image = new Image;
-    image.onload = () => {
-      if (seq !== lastSeq)
-        return;
-      const w = metadata && (metadata.deviceWidth || image.naturalWidth) || image.naturalWidth;
-      const h = metadata && (metadata.deviceHeight || image.naturalHeight) || image.naturalHeight;
-      if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
-      }
-      ctx.drawImage(image, 0, 0, w, h);
-      lastMeta = { deviceWidth: w, deviceHeight: h };
-      if (w > 0 && h > 0)
-        frame.style.setProperty("--live-ar", (w / h).toString());
-      const ov = frame.querySelector(".overlay-cta");
-      if (ov)
-        ov.classList.add("hidden");
-      last.textContent = `Live ${new Date().toLocaleTimeString()}`;
-    };
-    image.src = src;
-  }
-  function createClickPulse(clientX, clientY) {
-    const rect = frame.getBoundingClientRect();
-    const dot = document.createElement("div");
-    dot.className = "click-pulse";
-    dot.style.left = `${clientX - rect.left}px`;
-    dot.style.top = `${clientY - rect.top}px`;
-    frame.appendChild(dot);
-    setTimeout(() => dot.remove(), 600);
-  }
-  return Object.assign(wrap, {
-    update,
-    setTask,
-    setSocket,
-    drawFrame,
-    isStreaming: () => streamActive,
-    isManual: () => manual,
-    isExpanded: () => expanded
-  });
-  function urlsMatch(a, b) {
-    const norm = (u) => {
-      if (!u)
-        return "";
-      let s = String(u).trim();
-      if (!/^https?:\/\//i.test(s))
-        s = "https://" + s;
-      try {
-        const uo = new URL(s);
-        const host = uo.host.toLowerCase();
-        const proto = uo.protocol.toLowerCase();
-        const path = uo.pathname.replace(/\/+$/, "");
-        return `${proto}//${host}${path}${uo.search}${uo.hash}`;
-      } catch {
-        return s.replace(/\/+$/, "");
-      }
-    };
-    return norm(a) === norm(b);
-  }
-  async function sendAction(action) {
-    try {
-      if (manual && expanded && socket && socket.readyState === WebSocket.OPEN) {
-        const congested = socket.bufferedAmount && socket.bufferedAmount > 1e6;
-        const isHighFreq = action && (action.action === "wheel" || action.action === "mouse_move");
-        if (congested && isHighFreq)
-          return;
-        socket.send(JSON.stringify({ type: "input", taskId: currentTask.id, action }));
-        return;
-      }
-      const res = await fetch(`/api/tasks/${currentTask.id}/action`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action) });
-      if (!res.ok)
-        return;
-      const data = await res.json();
-      if (data && data.screenshot && !streamActive)
-        update(data.screenshot);
-    } catch {}
-  }
-  function syncTopControls() {
-    if (manual && expanded)
-      giveBack.classList.remove("hidden");
-    else
-      giveBack.classList.add("hidden");
-  }
 }
 
 // public/app/components/ModelInfo.js
@@ -915,7 +374,240 @@ function TaskSidebar({ onSelect, onRename, onDelete }) {
   return Object.assign(wrap, { update });
 }
 
-// public/app/main.js
+// src/public/app/main.ts
+function LiveBrowserView() {
+  const wrap = document.createElement("div");
+  wrap.className = "live";
+  const toolbar = document.createElement("div");
+  toolbar.className = "toolbar";
+  const badge = document.createElement("div");
+  badge.className = "badge inline-flex items-center gap-2 px-3 py-1 rounded-full";
+  badge.innerHTML = '<span class="dot inline-block align-middle"></span> <span class="align-middle">Live Browser</span>';
+  const hint = document.createElement("div");
+  hint.className = "muted small subtle text-[12px]";
+  hint.textContent = "Click to interact directly - Auto-updates in real-time";
+  const spacer = document.createElement("div");
+  spacer.style.flex = "1";
+  const last = document.createElement("div");
+  last.className = "muted small subtle";
+  last.style.marginRight = "8px";
+  last.textContent = "";
+  const btn = (label, title, handler) => {
+    const b = document.createElement("button");
+    b.className = "btn";
+    b.textContent = label;
+    if (title)
+      b.title = title;
+    b.addEventListener("click", handler);
+    return b;
+  };
+  const state = {
+    currentTask: null,
+    isLive: false,
+    streamActive: false,
+    streamRequested: false,
+    expanded: false,
+    lastMeta: null,
+    socket: null
+  };
+  const refresh = btn("↻", "Refresh browser page", async () => {
+    if (!state.currentTask?.id)
+      return;
+    await sendAction({ action: "navigate", url: "reload", reason: "User refresh" });
+  });
+  const openNew = btn("⧉", "Open in new browser tab", async () => {
+    if (!state.currentTask?.id)
+      return;
+    try {
+      const res = await fetch("/api/page-state");
+      if (res.ok) {
+        const data = await res.json();
+        if (data.url && data.url !== "about:blank") {
+          window.open(data.url, "_blank");
+        }
+      }
+    } catch {}
+  });
+  toolbar.append(badge, hint, spacer, last, refresh, openNew);
+  const frame = document.createElement("div");
+  frame.className = "frame";
+  const backdrop = document.createElement("div");
+  backdrop.className = "backdrop";
+  const canvas = document.createElement("canvas");
+  canvas.className = "canvas";
+  canvas.style.display = "none";
+  const img = document.createElement("img");
+  img.className = "screenshot";
+  img.style.display = "block";
+  const overlay = document.createElement("div");
+  overlay.className = "overlay-cta hidden";
+  overlay.innerHTML = `
+    <div class="overlay-glass">
+      <button class="overlay-btn">
+        <span>\uD83D\uDDB1️ Click to control directly</span>
+      </button>
+    </div>
+  `;
+  overlay.addEventListener("click", async (ev) => {
+    if (!state.currentTask?.id)
+      return;
+    ev.preventDefault();
+    await enableLiveMode();
+    toggleExpanded(true);
+  });
+  frame.append(backdrop, canvas, img, overlay);
+  wrap.appendChild(toolbar);
+  wrap.appendChild(frame);
+  frame.addEventListener("click", async (ev) => {
+    if (!state.isLive || !state.currentTask)
+      return;
+    const targetEl = state.streamActive ? canvas : img;
+    const rect = targetEl.getBoundingClientRect();
+    const relX = (ev.clientX - rect.left) / rect.width;
+    const relY = (ev.clientY - rect.top) / rect.height;
+    const vw = state.streamActive ? state.lastMeta?.deviceWidth || canvas.width : img.naturalWidth || rect.width;
+    const vh = state.streamActive ? state.lastMeta?.deviceHeight || canvas.height : img.naturalHeight || rect.height;
+    const x = Math.round(relX * vw);
+    const y = Math.round(relY * vh);
+    createClickPulse(ev.clientX, ev.clientY);
+    await sendDirectAction({ action: "click", coordinates: { x, y }, reason: "User click" });
+  });
+  frame.addEventListener("mouseenter", () => {
+    if (!state.isLive)
+      overlay.classList.remove("hidden");
+  });
+  frame.addEventListener("mouseleave", () => {
+    if (!state.isLive)
+      overlay.classList.add("hidden");
+  });
+  async function enableLiveMode() {
+    if (state.isLive)
+      return;
+    state.isLive = true;
+    frame.classList.add("live-mode");
+    if (state.currentTask?.id) {
+      try {
+        await fetch(`/api/tasks/${state.currentTask.id}/pause`, { method: "POST" });
+      } catch {}
+      if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+        const message = {
+          type: "liveControl",
+          taskId: state.currentTask.id
+        };
+        state.socket.send(JSON.stringify(message));
+      }
+    }
+    if (!state.streamRequested && state.socket && state.socket.readyState === WebSocket.OPEN) {
+      state.socket.send(JSON.stringify({ type: "startScreencast", taskId: state.currentTask?.id }));
+      state.streamRequested = true;
+    }
+  }
+  function toggleExpanded(force) {
+    state.expanded = force !== undefined ? force : !state.expanded;
+    wrap.classList.toggle("expanded", state.expanded);
+    document.body.classList.toggle("live-expanded", state.expanded);
+  }
+  function createClickPulse(x, y) {
+    const pulse = document.createElement("div");
+    pulse.className = "click-pulse";
+    pulse.style.left = `${x}px`;
+    pulse.style.top = `${y}px`;
+    document.body.appendChild(pulse);
+    setTimeout(() => document.body.removeChild(pulse), 600);
+  }
+  async function sendDirectAction(action) {
+    try {
+      if (state.isLive && state.socket && state.socket.readyState === WebSocket.OPEN) {
+        const message = {
+          type: "directInput",
+          taskId: state.currentTask.id,
+          action
+        };
+        state.socket.send(JSON.stringify(message));
+        return;
+      }
+      if (state.currentTask?.id) {
+        const res = await fetch(`/api/tasks/${state.currentTask.id}/action`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(action)
+        });
+        if (!res.ok)
+          return;
+        const data = await res.json();
+        if (data && data.screenshot && !state.streamActive) {
+          update(data.screenshot);
+        }
+      }
+    } catch (error) {
+      console.error("Error sending direct action:", error);
+    }
+  }
+  async function sendAction(action) {
+    return sendDirectAction(action);
+  }
+  function update(screenshot) {
+    if (screenshot && screenshot.startsWith("data:image/")) {
+      img.src = screenshot;
+      img.style.display = "block";
+      canvas.style.display = "none";
+      last.textContent = new Date().toLocaleTimeString();
+    }
+  }
+  function drawFrame(frameData) {
+    if (!frameData)
+      return;
+    state.streamActive = true;
+    img.style.display = "none";
+    canvas.style.display = "block";
+    const ctx = canvas.getContext("2d");
+    if (!ctx)
+      return;
+    const image = new Image;
+    image.onload = () => {
+      canvas.width = image.width;
+      canvas.height = image.height;
+      ctx.drawImage(image, 0, 0);
+    };
+    image.src = `data:image/jpeg;base64,${frameData}`;
+  }
+  function setTask(task) {
+    state.currentTask = task;
+    if (!task) {
+      last.textContent = "";
+      return;
+    }
+    refresh.disabled = !task?.id;
+    openNew.disabled = !task?.id;
+    if (state.isLive && state.socket && state.socket.readyState === WebSocket.OPEN) {
+      state.socket.send(JSON.stringify({ type: "startScreencast", taskId: task.id }));
+    }
+  }
+  function setSocket(socket) {
+    state.socket = socket;
+    if (socket) {
+      socket.addEventListener("message", (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "screencastFrame" && msg.frame) {
+            drawFrame(msg.frame);
+          } else if (msg.type === "controlGranted") {
+            console.log("Live control granted");
+          }
+        } catch {}
+      });
+    }
+  }
+  function isStreaming() {
+    return state.streamActive;
+  }
+  wrap.update = update;
+  wrap.setTask = setTask;
+  wrap.setSocket = setSocket;
+  wrap.drawFrame = drawFrame;
+  wrap.isStreaming = isStreaming;
+  return wrap;
+}
 var h = (tag, props = {}, ...children) => {
   const el = document.createElement(tag);
   Object.entries(props || {}).forEach(([k, v]) => {
@@ -938,10 +630,19 @@ var h = (tag, props = {}, ...children) => {
 };
 
 class App {
+  root;
+  session;
+  ws = null;
+  state;
+  taskInput;
+  liveView;
+  modelInfo;
+  taskStatus;
+  activityLog;
+  sidebar;
   constructor(root) {
     this.root = root;
     this.session = new Session;
-    this.ws = null;
     this.state = {
       info: null,
       currentTask: null
@@ -973,16 +674,19 @@ class App {
     this.sidebar = TaskSidebar({
       onSelect: (t) => this.setCurrentTask(t),
       onRename: async (t, name) => {
-        await fetch(`/api/tasks/${t.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ description: name }) });
+        await fetch(`/api/tasks/${t.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ description: name })
+        });
       },
       onDelete: async (t) => {
         await fetch(`/api/tasks/${t.id}`, { method: "DELETE" });
         if (this.state.currentTask && this.state.currentTask.id === t.id) {
           this.state.currentTask = null;
-          this.taskStatus.update(null);
-          this.activityLog.update([]);
-          if (this.liveView && this.liveView.setTask)
-            this.liveView.setTask(null);
+          this.taskStatus.update?.(null);
+          this.activityLog.update?.([]);
+          this.liveView.setTask?.(null);
         }
         this.refreshSidebar();
       }
@@ -996,8 +700,7 @@ class App {
       const res = await fetch("/api/info");
       if (res.ok) {
         this.state.info = await res.json();
-        if (this.modelInfo && this.modelInfo.update)
-          this.modelInfo.update(this.state.info);
+        this.modelInfo?.update?.(this.state.info);
       }
     } catch {}
   }
@@ -1008,7 +711,7 @@ class App {
         return;
       const { tasks } = await res.json();
       if (tasks && tasks.length) {
-        const latest = tasks.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0];
+        const latest = tasks.sort((a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime())[0];
         this.setCurrentTask(latest);
       }
     } catch {}
@@ -1020,22 +723,24 @@ class App {
       this.ws = new WebSocket(url);
       this.ws.addEventListener("open", () => {
         if (this.state.currentTask) {
-          this.ws.send(JSON.stringify({ type: "subscribe", taskId: this.state.currentTask.id }));
+          const message = {
+            type: "subscribe",
+            taskId: this.state.currentTask.id
+          };
+          this.ws.send(JSON.stringify(message));
         }
-        if (this.liveView && this.liveView.setSocket)
-          this.liveView.setSocket(this.ws);
+        this.liveView.setSocket?.(this.ws);
       });
       this.ws.addEventListener("message", (ev) => {
         try {
           const msg = JSON.parse(ev.data);
-          if (msg.type === "taskUpdate") {
+          if (msg.type === "taskUpdate" && msg.task) {
             if (!this.state.currentTask || msg.task.id === this.state.currentTask.id) {
               this.setCurrentTask(msg.task);
             }
             this.refreshSidebar();
           } else if (msg.type === "screencastFrame") {
-            if (this.liveView && this.liveView.drawFrame)
-              this.liveView.drawFrame(msg.frame);
+            this.liveView.drawFrame?.(msg.frame || "");
           } else if (msg.type === "screencastError") {
             console.warn("Screencast error:", msg.error);
           }
@@ -1055,10 +760,21 @@ class App {
     });
     const data = await res.json();
     if (res.ok) {
-      const task = { id: data.taskId, description: text, status: "created", createdAt: new Date().toISOString(), steps: [], screenshots: [] };
+      const task = {
+        id: data.taskId,
+        description: text,
+        status: "created",
+        createdAt: new Date().toISOString(),
+        steps: [],
+        screenshots: []
+      };
       this.setCurrentTask(task);
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ type: "subscribe", taskId: task.id }));
+        const message = {
+          type: "subscribe",
+          taskId: task.id
+        };
+        this.ws.send(JSON.stringify(message));
       }
       this.refreshSidebar();
     } else {
@@ -1073,16 +789,19 @@ class App {
   }
   setCurrentTask(task) {
     this.state.currentTask = task;
-    this.taskStatus.update(task);
-    this.activityLog.update(task.steps || []);
-    if (this.liveView && this.liveView.setTask)
-      this.liveView.setTask(task);
+    this.taskStatus.update?.(task);
+    this.activityLog.update?.(task.steps || []);
+    this.liveView.setTask?.(task);
     const last = (task.screenshots || [])[task.screenshots.length - 1];
-    if (last && !(this.liveView && this.liveView.isStreaming && this.liveView.isStreaming())) {
-      this.liveView.update(last.data);
+    if (last && !this.liveView.isStreaming?.()) {
+      this.liveView.update?.(last.data);
     }
     if (this.ws && this.ws.readyState === WebSocket.OPEN && task && task.id) {
-      this.ws.send(JSON.stringify({ type: "subscribe", taskId: task.id }));
+      const message = {
+        type: "subscribe",
+        taskId: task.id
+      };
+      this.ws.send(JSON.stringify(message));
     }
   }
   async refreshSidebar() {
@@ -1091,13 +810,13 @@ class App {
       if (!res.ok)
         return;
       const { tasks } = await res.json();
-      if (this.sidebar && this.sidebar.update) {
-        this.sidebar.update(tasks, this.state.currentTask && this.state.currentTask.id);
-      }
+      this.sidebar.update?.(tasks, this.state.currentTask?.id);
     } catch {}
   }
 }
 document.addEventListener("DOMContentLoaded", () => {
   const root = document.getElementById("app");
-  new App(root);
+  if (root) {
+    new App(root);
+  }
 });

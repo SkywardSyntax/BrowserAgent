@@ -21,17 +21,30 @@ export class BrowserAgent {
     _onScreencastFrame = null;
     constructor(taskManager) {
         this.taskManager = taskManager;
-        // Initialize OpenAI client
-        this.openai = new OpenAI({
-            baseURL: process.env.AZURE_OPENAI_ENDPOINT + 'openai/v1/',
-            apiKey: process.env.AZURE_OPENAI_API_KEY,
-            defaultQuery: { 'api-version': process.env.AZURE_OPENAI_API_VERSION },
-            defaultHeaders: {
-                'api-key': process.env.AZURE_OPENAI_API_KEY,
-            },
-            timeout: parseInt(process.env.OPENAI_TIMEOUT_MS || '60000', 10),
-            maxRetries: parseInt(process.env.OPENAI_MAX_RETRIES || '1', 10),
-        });
+        // Initialize OpenAI client (with fallback for testing)
+        if (process.env.AZURE_OPENAI_API_KEY && process.env.AZURE_OPENAI_ENDPOINT) {
+            this.openai = new OpenAI({
+                baseURL: process.env.AZURE_OPENAI_ENDPOINT + 'openai/v1/',
+                apiKey: process.env.AZURE_OPENAI_API_KEY,
+                defaultQuery: { 'api-version': process.env.AZURE_OPENAI_API_VERSION },
+                defaultHeaders: {
+                    'api-key': process.env.AZURE_OPENAI_API_KEY,
+                },
+                timeout: parseInt(process.env.OPENAI_TIMEOUT_MS || '60000', 10),
+                maxRetries: parseInt(process.env.OPENAI_MAX_RETRIES || '1', 10),
+            });
+        }
+        else {
+            console.warn('OpenAI credentials not configured - using mock client for testing');
+            // Mock OpenAI client for testing
+            this.openai = {
+                chat: {
+                    completions: {
+                        create: async () => ({ choices: [{ message: { content: 'Mock response' } }] })
+                    }
+                }
+            };
+        }
         this.displayWidth = parseInt(process.env.DISPLAY_WIDTH || '1280', 10);
         this.displayHeight = parseInt(process.env.DISPLAY_HEIGHT || '720', 10);
         this.deploymentName = process.env.AZURE_OPENAI_DEPLOYMENT_NAME || 'gpt-4o';

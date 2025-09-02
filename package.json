@@ -4,10 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsc && bun run dist/server/index.js",
-    "build": "tsc && rm -rf dist/public && mkdir -p dist/public && cp -r public/* dist/public/ && bun build dist/public/app/main.js --outdir dist/public/app --target browser",
+    "dev": "npm run build:ts && bun run dist/server/index.js",
+    "build": "npm run build:ts && npm run build:frontend",
     "build:ts": "tsc",
-    "start": "NODE_ENV=production tsc && bun run dist/server/index.js",
+    "build:frontend": "rm -rf dist/public && mkdir -p dist/public && cp -r public/* dist/public/ && bun build src/public/app/main.ts --outdir dist/public/app --target browser --format esm",
+    "start": "NODE_ENV=production npm run build && bun run dist/server/index.js",
     "setup": "bun run setup.js",
     "test": "bun run test.js"
   },

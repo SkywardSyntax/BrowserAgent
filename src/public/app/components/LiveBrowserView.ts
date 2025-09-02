@@ -1,4 +1,4 @@
-import { Task, WebSocketMessage, BrowserAction, HTMLElementWithProps } from '../../types/index.js';
+import { Task, WebSocketMessage, BrowserAction, HTMLElementWithProps } from '../types.js';
 
 interface LiveBrowserViewState {
   currentTask: Task | null;
@@ -300,7 +300,7 @@ export function LiveBrowserView(): HTMLElementWithProps {
     if (e.key === 'Enter') {
       const url = (addrInput.value || '').trim();
       if (!url) return;
-      const hasProto = /^https?:\\/\\//i.test(url);
+      const hasProto = /^https?:\/\//i.test(url);
       const finalUrl = hasProto ? url : `https://${url}`;
       pendingNavUrl = finalUrl;
       isEditingAddr = false;
@@ -485,15 +485,15 @@ export function LiveBrowserView(): HTMLElementWithProps {
     const norm = (u: string): string => {
       if (!u) return '';
       let s = String(u).trim();
-      if (!/^https?:\\/\\//i.test(s)) s = 'https://' + s;
+      if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
       try {
         const uo = new URL(s);
         const host = uo.host.toLowerCase();
         const proto = uo.protocol.toLowerCase();
-        const path = uo.pathname.replace(/\\/+$/, '');
+        const path = uo.pathname.replace(/\/+$/, '');
         return `${proto}//${host}${path}${uo.search}${uo.hash}`;
       } catch {
-        return s.replace(/\\/+$/, '');
+        return s.replace(/\/+$/, '');
       }
     };
     return norm(a) === norm(b);

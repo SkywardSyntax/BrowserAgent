@@ -15,6 +15,7 @@ bun.lockb
 
 # production
 /build
+/dist
 
 # misc
 .DS_Store
@@ -36,6 +37,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+*.d.ts
+*.d.ts.map
+*.js.map
 
 # Playwright
 /test-results/
