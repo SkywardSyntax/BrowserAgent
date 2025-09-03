@@ -4,9 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun run server/index.js",
-    "build": "rm -rf dist && mkdir -p dist/public && cp -r public/* dist/public/ && bun build public/app/main.js --outdir dist/public/app --target browser",
-    "start": "NODE_ENV=production bun run server/index.js",
+    "build:dev": "bun build public/app/main.tsx --outdir public/app --target browser",
+    "dev": "bun run build:dev && bun run server/index.ts",
+    "build": "rm -rf dist && mkdir -p dist/public && cp -r public/* dist/public/ && bun build public/app/main.tsx --outdir dist/public/app --target browser",
+    "start": "NODE_ENV=production bun run server/index.ts",
     "setup": "bun run setup.js",
     "test": "bun run test.js"
   },

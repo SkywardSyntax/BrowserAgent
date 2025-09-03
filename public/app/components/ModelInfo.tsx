@@ -1,4 +1,6 @@
-export function ModelInfo() {
+import type { Info } from '../types';
+
+export function ModelInfo(): HTMLDivElement & { update: (info: Info | null) => void } {
   const box = document.createElement('div');
   box.style.marginTop = '12px';
   const line = document.createElement('div');
@@ -27,7 +29,7 @@ export function ModelInfo() {
 
   box.append(row, extra);
 
-  function update(info) {
+  function update(info: Info | null): void {
     if (!info) return;
     line.textContent = `Model: ${info.model} • Viewport: ${info.viewport.width}×${info.viewport.height} • ${info.headless ? 'Headless' : 'Headed'}`;
     extra.textContent = info.wsUrl ? `WS: ${info.wsUrl}` : '';

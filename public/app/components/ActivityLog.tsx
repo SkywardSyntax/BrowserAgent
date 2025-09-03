@@ -1,6 +1,7 @@
-import { Dropdown } from './Dropdown.js';
+import { Dropdown } from './Dropdown';
+import type { Step } from '../types';
 
-export function ActivityLog() {
+export function ActivityLog(): HTMLDivElement & { update: (steps: Step[]) => void } {
   const wrap = document.createElement('div');
 
   const controls = document.createElement('div');
@@ -23,9 +24,9 @@ export function ActivityLog() {
   const box = document.createElement('div');
   box.className = 'log';
 
-  let lastSteps = [];
+  let lastSteps: Step[] = [];
 
-  function line(step) {
+  function line(step: Step): HTMLDivElement {
     const item = document.createElement('div');
     item.className = 'item';
     if (step.error) item.classList.add('error');
@@ -39,8 +40,8 @@ export function ActivityLog() {
     return item;
   }
 
-  function render() {
-    const v = dd.value;
+  function render(): void {
+    const v = dd.value as 'all' | 'errors' | 'reasoning' | 'browser_action';
     box.innerHTML = '';
     const filtered = lastSteps.filter((s) => {
       if (v === 'all') return true;
@@ -53,7 +54,7 @@ export function ActivityLog() {
     box.scrollTop = box.scrollHeight;
   }
 
-  function update(steps) {
+  function update(steps: Step[]): void {
     lastSteps = steps || [];
     render();
   }

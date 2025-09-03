@@ -1,4 +1,12 @@
-export function TaskSidebar({ onSelect, onRename, onDelete }) {
+import type { Task } from '../types';
+
+interface Props {
+  onSelect?: (task: Task) => void;
+  onRename?: (task: Task, name: string) => void;
+  onDelete?: (task: Task) => void;
+}
+
+export function TaskSidebar({ onSelect, onRename, onDelete }: Props): HTMLDivElement & { update: (tasks: Task[], currentTaskId?: string | null) => void } {
   const wrap = document.createElement('div');
   wrap.className = 'sidebar';
 
@@ -9,14 +17,14 @@ export function TaskSidebar({ onSelect, onRename, onDelete }) {
   const list = document.createElement('div');
   list.className = 'sidebar-list';
 
-  let tasks = [];
-  let currentId = null;
+  let tasks: Task[] = [];
+  let currentId: string | null = null;
 
-  function render() {
+  function render(): void {
     list.innerHTML = '';
     tasks
       .slice()
-      .sort((a,b) => new Date(b.updatedAt||b.createdAt) - new Date(a.updatedAt||a.createdAt))
+      .sort((a, b) => new Date(a.updatedAt || a.createdAt || '').getTime() < new Date(b.updatedAt || b.createdAt || '').getTime() ? 1 : -1)
       .forEach((t) => {
         const item = document.createElement('div');
         item.className = 'sidebar-item';
@@ -28,7 +36,8 @@ export function TaskSidebar({ onSelect, onRename, onDelete }) {
 
         const meta = document.createElement('div');
         meta.className = 'meta';
-        meta.textContent = `${t.status || 'created'} • ${new Date(t.updatedAt||t.createdAt).toLocaleTimeString()}`;
+        const when = new Date(t.updatedAt || t.createdAt || Date.now()).toLocaleTimeString();
+        meta.textContent = `${t.status || 'created'} • ${when}`;
 
         const actions = document.createElement('div');
         actions.className = 'actions';
@@ -38,8 +47,8 @@ export function TaskSidebar({ onSelect, onRename, onDelete }) {
         renameBtn.textContent = 'Rename';
         renameBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          const name = prompt('Rename task', t.description || '');
-          if (name != null) onRename && onRename(t, name);
+          const name = prompt('Rename task', t.description || '') ?? undefined;
+          if (name !== undefined) onRename && onRename(t, name);
         });
 
         const delBtn = document.createElement('button');
@@ -58,7 +67,7 @@ export function TaskSidebar({ onSelect, onRename, onDelete }) {
       });
   }
 
-  function update(newTasks, currentTaskId) {
+  function update(newTasks: Task[], currentTaskId?: string | null): void {
     tasks = newTasks || [];
     currentId = currentTaskId || null;
     render();
@@ -67,3 +76,4 @@ export function TaskSidebar({ onSelect, onRename, onDelete }) {
   wrap.append(header, list);
   return Object.assign(wrap, { update });
 }
+
