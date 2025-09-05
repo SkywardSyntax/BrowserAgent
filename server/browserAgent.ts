@@ -55,7 +55,6 @@ export class BrowserAgent {
       defaultQuery: { 'api-version': process.env.AZURE_OPENAI_API_VERSION },
       defaultHeaders: { 'api-key': process.env.AZURE_OPENAI_API_KEY || '' },
       timeout: parseInt(process.env.OPENAI_TIMEOUT_MS || '60000', 10),
-      maxRetries: parseInt(process.env.OPENAI_MAX_RETRIES || '1', 10),
     });
 
     this.displayWidth = parseInt(process.env.DISPLAY_WIDTH || '1280', 10);
@@ -295,9 +294,9 @@ export class BrowserAgent {
   }
 
   async aiProcessingLoop(taskId: string): Promise<void> {
-    const maxIterations = 20; let iterations = 0;
+    let iterations = 0;
     this.taskLoopState.set(taskId, this.taskLoopState.get(taskId) || { unchangedCount: 0, repeatCount: 0, remediationCount: 0 });
-    while (iterations < maxIterations) {
+    while (true) {
       const task = this.taskManager.getTask(taskId);
       if (!task) break;
       if (task.status === 'paused') { console.log(`Task ${taskId} is paused, waiting...`); await this.waitForResume(taskId); continue; }
@@ -340,17 +339,15 @@ export class BrowserAgent {
         if (errName === 'AbortError') { await this.waitForResume(taskId); }
       }
     }
-    if (iterations >= maxIterations) { this.taskManager.failTask(taskId, 'Maximum iterations reached'); }
   }
 
   // New state machine-based processing loop for better reliability and control flow
   async aiProcessingLoopWithStateMachine(taskId: string): Promise<void> {
     const taskSM = this.getOrCreateTaskStateMachine(taskId);
     const loopSM = new LoopStateMachine();
-    const maxIterations = 20;
     let iterations = 0;
 
-    while (iterations < maxIterations && taskSM.isActive()) {
+    while (iterations < 1000 && taskSM.isActive()) {
       iterations++;
       
       // Check for state changes that require breaking out of the loop
@@ -476,7 +473,7 @@ export class BrowserAgent {
       }
     }
 
-    if (iterations >= maxIterations && taskSM.isRunning()) {
+    if (iterations >= 1000 && taskSM.isRunning()) {
       await taskSM.fail();
       this.taskManager.failTask(taskId, 'Maximum iterations reached');
     }
@@ -602,7 +599,7 @@ ${context}` },
     const controller = new AbortController();
     try { this.abortControllers.set(task.id, controller); } catch {}
     const response = await this.openai.chat.completions.create(
-      { model: this.deploymentName, messages: messages as any, tools: tools as any, tool_choice: 'auto', max_tokens: 1000, temperature: 0.1 } as any,
+      { model: this.deploymentName, messages: messages as any, tools: tools as any, tool_choice: 'auto', temperature: 0.1 } as any,
       { signal: controller.signal, timeout: this.openAITimeoutMs } as any
     );
     this.abortControllers.delete(task.id);

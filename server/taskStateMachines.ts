@@ -218,7 +218,6 @@ export class BrowserControlStateMachine extends StateMachine<BrowserControlState
 
 export class LoopStateMachine extends StateMachine<LoopState> {
   private consecutiveFailures: number = 0;
-  private maxFailures: number = 3;
 
   constructor() {
     const config: StateMachineConfig<LoopState> = {
@@ -235,7 +234,7 @@ export class LoopStateMachine extends StateMachine<LoopState> {
         { from: LoopState.CHECKING_PROGRESS, to: LoopState.IDLE, event: 'ITERATION_COMPLETE' },
         { from: LoopState.CHECKING_PROGRESS, to: LoopState.RECOVERY, event: 'NO_PROGRESS' },
         { from: LoopState.RECOVERY, to: LoopState.IDLE, event: 'RECOVERED' },
-        { from: LoopState.RECOVERY, to: LoopState.IDLE, event: 'RECOVERY_FAILED', guard: () => this.consecutiveFailures < this.maxFailures }
+        { from: LoopState.RECOVERY, to: LoopState.IDLE, event: 'RECOVERY_FAILED' }
       ]
     };
 
@@ -293,7 +292,7 @@ export class LoopStateMachine extends StateMachine<LoopState> {
   }
 
   shouldAbortLoop(): boolean {
-    return this.consecutiveFailures >= this.maxFailures;
+    return false; // No cap on consecutive failures
   }
 
   getConsecutiveFailures(): number {
