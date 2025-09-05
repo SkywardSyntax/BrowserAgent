@@ -23,6 +23,7 @@ export class BrowserAgent {
   navTimeoutMs: number;
   keyMap: KeyMap;
   cdpClient: CDPSession | null;
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'minimal';
   screencast: { active: boolean; listeners: Set<(frame: { data: string; metadata?: { deviceWidth?: number; deviceHeight?: number }; format: 'jpeg' | 'png' }) => void>; usingCDP: boolean; interval: NodeJS.Timeout | null };
   _onScreencastFrame?: (evt: { data: string; sessionId: string; metadata?: { deviceWidth?: number; deviceHeight?: number } }) => void;
   private _unsubscribeTM: () => void;
@@ -33,6 +34,19 @@ export class BrowserAgent {
   private taskStateMachines: Map<string, TaskStateMachine>;
   private browserControlSM: BrowserControlStateMachine;
   private heartbeats: Map<string, NodeJS.Timeout>;
+  private adaptiveTimeouts: Map<string, number> = new Map();
+  private networkConditions: { slow: boolean; unstable: boolean } = { slow: false, unstable: false };
+  private performanceMetrics: { 
+    avgResponseTime: number; 
+    failedRequests: number; 
+    totalRequests: number;
+    lastMetricsReset: number;
+  } = { 
+    avgResponseTime: 0, 
+    failedRequests: 0, 
+    totalRequests: 0,
+    lastMetricsReset: Date.now()
+  };
 
   constructor(taskManager: TaskManager) {
     this.taskManager = taskManager;
@@ -48,6 +62,13 @@ export class BrowserAgent {
     this.taskStateMachines = new Map();
     this.browserControlSM = new BrowserControlStateMachine();
     this.heartbeats = new Map();
+    
+    // Initialize adaptive timeout tracking
+    this.adaptiveTimeouts = new Map();
+    this.networkConditions = { slow: false, unstable: false };
+    
+    // Start network monitoring
+    this._initializeNetworkMonitoring();
 
     this.openai = new OpenAI({
       baseURL: (process.env.AZURE_OPENAI_ENDPOINT || '') + 'openai/v1/',
@@ -63,6 +84,12 @@ export class BrowserAgent {
     this.openAITimeoutMs = parseInt(process.env.OPENAI_TIMEOUT_MS || '60000', 10);
     this.actionTimeoutMs = parseInt(process.env.ACTION_TIMEOUT_MS || '8000', 10);
     this.navTimeoutMs = parseInt(process.env.NAV_TIMEOUT_MS || '10000', 10);
+
+    // Parse optional reasoning effort; if unset, assume non-reasoning-capable model
+    const re = (process.env.REASONING_EFFORT || '').trim().toLowerCase();
+    if (re === 'low' || re === 'medium' || re === 'high') {
+      this.reasoningEffort = re;
+    }
 
     this.keyMap = {
       Return: 'Enter',
@@ -95,6 +122,121 @@ export class BrowserAgent {
     });
   }
 
+  private async _initializeNetworkMonitoring(): Promise<void> {
+    // Will be called after browser initialization
+  }
+
+  private async _setupNetworkMonitoring(): Promise<void> {
+    if (!this.page) return;
+    
+    try {
+      // Monitor network response times using request/response pairs
+      const requestStartTimes = new Map<string, number>();
+      const responseTimes: number[] = [];
+      
+      this.page.on('request', (request) => {
+        requestStartTimes.set(request.url(), Date.now());
+        this.performanceMetrics.totalRequests++;
+      });
+      
+      this.page.on('response', (response) => {
+        const startTime = requestStartTimes.get(response.url());
+        if (startTime) {
+          const responseTime = Date.now() - startTime;
+          requestStartTimes.delete(response.url());
+          responseTimes.push(responseTime);
+          
+          // Update performance metrics
+          this._updatePerformanceMetrics(responseTime);
+          
+          // Detect slow network conditions based on recent averages
+          if (responseTimes.length > 5) {
+            const recentAvg = responseTimes.slice(-5).reduce((a, b) => a + b, 0) / 5;
+            this.networkConditions.slow = recentAvg > 2000;
+            
+            // Keep only recent response times
+            if (responseTimes.length > 20) {
+              responseTimes.splice(0, 10);
+            }
+          }
+        }
+      });
+      
+      // Monitor failed requests for instability
+      this.page.on('requestfailed', (request) => {
+        this.performanceMetrics.failedRequests++;
+        this.networkConditions.unstable = true;
+        console.log('Detected network instability:', request.url());
+        
+        // Reset instability flag after a delay
+        setTimeout(() => {
+          this.networkConditions.unstable = false;
+        }, 10000);
+      });
+      
+      // Reset metrics periodically
+      setInterval(() => {
+        this._resetPerformanceMetrics();
+      }, 60000); // Reset every minute
+      
+    } catch (error) {
+      console.warn('Network monitoring setup failed:', error);
+    }
+  }
+
+  private _updatePerformanceMetrics(responseTime: number): void {
+    const total = this.performanceMetrics.totalRequests;
+    const current = this.performanceMetrics.avgResponseTime;
+    
+    // Update running average
+    this.performanceMetrics.avgResponseTime = ((current * (total - 1)) + responseTime) / total;
+  }
+
+  private _resetPerformanceMetrics(): void {
+    this.performanceMetrics = {
+      avgResponseTime: 0,
+      failedRequests: 0,
+      totalRequests: 0,
+      lastMetricsReset: Date.now()
+    };
+    console.log('Performance metrics reset');
+  }
+
+  private _getNetworkHealth(): { score: number; description: string } {
+    const failureRate = this.performanceMetrics.totalRequests > 0 
+      ? this.performanceMetrics.failedRequests / this.performanceMetrics.totalRequests 
+      : 0;
+    
+    let score = 100;
+    let description = 'Excellent';
+    
+    // Deduct points for slow responses
+    if (this.performanceMetrics.avgResponseTime > 3000) {
+      score -= 40;
+      description = 'Poor';
+    } else if (this.performanceMetrics.avgResponseTime > 1500) {
+      score -= 20;
+      description = 'Fair';
+    } else if (this.performanceMetrics.avgResponseTime > 800) {
+      score -= 10;
+      description = 'Good';
+    }
+    
+    // Deduct points for failures
+    if (failureRate > 0.1) {
+      score -= 30;
+      description = 'Poor';
+    } else if (failureRate > 0.05) {
+      score -= 15;
+      description = 'Fair';
+    } else if (failureRate > 0.01) {
+      score -= 5;
+      description = 'Good';
+    }
+    
+    return { score: Math.max(0, score), description };
+  }
+
   async initializeBrowser(): Promise<void> {
     if (this.browser) return;
     try {
@@ -113,6 +255,10 @@ export class BrowserAgent {
       }
       this.page = await this.browser.newPage();
       await this.page.setViewportSize({ width: this.displayWidth, height: this.displayHeight });
+      
+      // Setup network monitoring
+      await this._setupNetworkMonitoring();
+      
       console.log(`Browser initialized successfully (headless=${headless})`);
     } catch (error) {
       console.error('Failed to initialize browser:', error);
@@ -317,19 +463,6 @@ export class BrowserAgent {
         const newShot = await this.takeScreenshot().catch(() => null);
         const newFingerprint = newShot ? await this._computeFingerprintFromScreenshot(newShot) : undefined;
         await this._updateLoopGuard(taskId, prevFingerprint, newFingerprint, executed);
-        const guard = this.taskLoopState.get(taskId)!;
-        if (guard.unchangedCount >= 3 || guard.repeatCount >= 3) {
-          const remediationAttempt = guard.remediationCount;
-          if (remediationAttempt === 0) {
-            this.taskManager.addStep(taskId, { type: 'warning', description: 'Loop detected (no progress). Attempting page reload to recover.' });
-            await this.page!.reload({ timeout: this.navTimeoutMs, waitUntil: 'domcontentloaded' }).catch(() => {});
-            guard.remediationCount++;
-            guard.unchangedCount = 0; guard.repeatCount = 0;
-          } else {
-            this.taskManager.failTask(taskId, 'Detected repeated no-progress actions. Stopping to prevent infinite loop.');
-            break;
-          }
-        }
         await this.delay(500);
       } catch (error) {
         console.error(`Error in AI processing loop iteration ${iterations}:`, error);
@@ -347,7 +480,7 @@ export class BrowserAgent {
     const loopSM = new LoopStateMachine();
     let iterations = 0;
 
-    while (iterations < 1000 && taskSM.isActive()) {
+    while (taskSM.isActive()) {
       iterations++;
       
       // Check for state changes that require breaking out of the loop
@@ -472,11 +605,6 @@ export class BrowserAgent {
         }
       }
     }
-
-    if (iterations >= 1000 && taskSM.isRunning()) {
-      await taskSM.fail();
-      this.taskManager.failTask(taskId, 'Maximum iterations reached');
-    }
   }
 
   private async waitForManualControlRelease(taskId: string): Promise<void> {
@@ -491,20 +619,33 @@ export class BrowserAgent {
       const newShot = await this.takeScreenshot().catch(() => null);
       if (!newShot) return false;
 
-      const newFingerprint = await this._computeFingerprintFromScreenshot(newShot);
+      // Enhanced progress detection with multiple strategies
+      const progressIndicators = await this._analyzeProgressIndicators(taskId, newShot, executed);
+      
       const state = this.taskLoopState.get(taskId) || { unchangedCount: 0, repeatCount: 0, remediationCount: 0 };
       
-      // Simple progress detection - if something was executed successfully, assume progress
+      // Strategy 1: Action-based progress
       const hasSuccessfulAction = executed.some(action => action.success);
       
-      if (hasSuccessfulAction) {
+      // Strategy 2: Visual change detection (enhanced)
+      const visualChangeDetected = await this._detectVisualChanges(taskId, newShot);
+      
+      // Strategy 3: Content-based progress
+      const contentProgressDetected = await this._detectContentProgress(newShot);
+      
+      // Strategy 4: URL change detection
+      const urlChanged = await this._detectUrlChange(taskId);
+      
+      const hasProgress = hasSuccessfulAction || visualChangeDetected || contentProgressDetected || urlChanged;
+      
+      if (hasProgress) {
         state.unchangedCount = 0;
         state.repeatCount = 0;
         this.taskLoopState.set(taskId, state);
         return true;
       }
 
-      // If no successful actions, consider it as no progress
+      // No progress detected
       state.unchangedCount++;
       this.taskLoopState.set(taskId, state);
       return false;
@@ -513,6 +654,142 @@ export class BrowserAgent {
       console.error('Error checking progress:', error);
       return false;
     }
+  }
+
+  private async _analyzeProgressIndicators(taskId: string, screenshot: string, executed: Array<{ key: string; success: boolean }>): Promise<{ visual: boolean; content: boolean; action: boolean }> {
+    return {
+      visual: await this._detectVisualChanges(taskId, screenshot),
+      content: await this._detectContentProgress(screenshot),
+      action: executed.some(action => action.success)
+    };
+  }
+
+  private async _detectVisualChanges(taskId: string, currentScreenshot: string): Promise<boolean> {
+    try {
+      if (!this.page) return false;
+      
+      const state = this.taskLoopState.get(taskId);
+      const previousFingerprint = state?.lastFingerprint;
+      
+      if (!previousFingerprint) {
+        // First screenshot, store it
+        const currentFingerprint = await this._computeFingerprintFromScreenshot(currentScreenshot);
+        if (state) {
+          state.lastFingerprint = currentFingerprint;
+          this.taskLoopState.set(taskId, state);
+        }
+        return true; // Assume progress on first screenshot
+      }
+      
+      const currentFingerprint = await this._computeFingerprintFromScreenshot(currentScreenshot);
+      
+      // Enhanced fingerprint comparison with similarity threshold
+      const similarity = this._calculateFingerprintSimilarity(previousFingerprint, currentFingerprint);
+      const hasSignificantChange = similarity < 0.95; // 95% similarity threshold
+      
+      if (state && hasSignificantChange) {
+        state.lastFingerprint = currentFingerprint;
+        this.taskLoopState.set(taskId, state);
+      }
+      
+      return hasSignificantChange;
+      
+    } catch (error) {
+      console.warn('Visual change detection failed:', error);
+      return false;
+    }
+  }
+
+  private async _detectContentProgress(screenshot: string): Promise<boolean> {
+    try {
+      if (!this.page) return false;
+      
+      // Check for dynamic content indicators
+      const dynamicIndicators = [
+        // Loading states that indicate progress
+        () => this.page!.locator('[class*="loading"]:not(:visible)').count(),
+        () => this.page!.locator('[class*="spinner"]:not(:visible)').count(),
+        () => this.page!.locator('[aria-live="polite"]').count(),
+        () => this.page!.locator('[role="status"]').count(),
+        
+        // New content indicators
+        () => this.page!.locator('[data-loaded="true"]').count(),
+        () => this.page!.locator('.new-content, .updated-content').count(),
+        
+        // Form submission indicators
+        () => this.page!.locator('.success-message, .error-message').count(),
+        () => this.page!.locator('[role="alert"]').count()
+      ];
+      
+      for (const indicator of dynamicIndicators) {
+        try {
+          const count = await indicator();
+          if (count > 0) {
+            return true; // Found content progress indicator
+          }
+        } catch {
+          continue;
+        }
+      }
+      
+      return false;
+      
+    } catch (error) {
+      console.warn('Content progress detection failed:', error);
+      return false;
+    }
+  }
+
+  private async _detectUrlChange(taskId: string): Promise<boolean> {
+    try {
+      if (!this.page) return false;
+      
+      const currentUrl = this.page.url();
+      const state = this.taskLoopState.get(taskId);
+      
+      if (!state || !state.lastFingerprint) {
+        // Store initial URL in state if not present
+        return false;
+      }
+      
+      const previousUrl = (state as any).lastUrl;
+      if (!previousUrl) {
+        (state as any).lastUrl = currentUrl;
+        this.taskLoopState.set(taskId, state);
+        return false;
+      }
+      
+      const urlChanged = currentUrl !== previousUrl;
+      if (urlChanged) {
+        (state as any).lastUrl = currentUrl;
+        this.taskLoopState.set(taskId, state);
+        console.log(`URL changed from ${previousUrl} to ${currentUrl}`);
+      }
+      
+      return urlChanged;
+      
+    } catch (error) {
+      console.warn('URL change detection failed:', error);
+      return false;
+    }
+  }
+
+  private _calculateFingerprintSimilarity(fp1: string, fp2: string): number {
+    if (!fp1 || !fp2) return 0;
+    if (fp1 === fp2) return 1;
+    
+    // Simple character-based similarity for hash strings
+    const minLength = Math.min(fp1.length, fp2.length);
+    const maxLength = Math.max(fp1.length, fp2.length);
+    
+    if (maxLength === 0) return 1;
+    
+    let matches = 0;
+    for (let i = 0; i < minLength; i++) {
+      if (fp1[i] === fp2[i]) matches++;
+    }
+    
+    return matches / maxLength;
   }
 
   async callAI(task: Task, screenshot: string): Promise<unknown> {
@@ -598,8 +875,19 @@ ${context}` },
 
     const controller = new AbortController();
     try { this.abortControllers.set(task.id, controller); } catch {}
+    const payload: any = { 
+      model: this.deploymentName, 
+      messages: messages as any, 
+      tools: tools as any, 
+      tool_choice: 'auto', 
+      temperature: 0.1
+    };
+    if (this.reasoningEffort) {
+      // Only include reasoning for models that support it; caller opts-in via env
+      payload.reasoning = { effort: this.reasoningEffort };
+    }
     const response = await this.openai.chat.completions.create(
-      { model: this.deploymentName, messages: messages as any, tools: tools as any, tool_choice: 'auto', temperature: 0.1 } as any,
+      payload,
       { signal: controller.signal, timeout: this.openAITimeoutMs } as any
     );
     this.abortControllers.delete(task.id);
@@ -668,7 +956,7 @@ ${context}` },
     const actionReason = (action as Record<string, unknown>).reason as string | undefined;
     this.taskManager.addStep(taskId, { type: 'browser_action', description: `${actionName}: ${actionReason}`, action });
 
-    const withRetry = async <T>(fn: () => Promise<T>, { retries = 2, delayMs = 500 } = {}): Promise<T> => {
+    const withRetry = async <T>(fn: () => Promise<T>, { retries = Number.MAX_SAFE_INTEGER, delayMs = 500 } = {}): Promise<T> => {
       let lastErr: unknown;
       for (let i = 0; i <= retries; i++) {
         try { return await fn(); } catch (e) { lastErr = e; if (i === retries) break; await this.delay(delayMs); }
@@ -734,10 +1022,28 @@ ${context}` },
             }
             throw new Error(`No element found by text: ${txt}`);
           }); break; }
-  case 'click_button_like': { const txt = typeof A.text === 'string' ? (A.text as string) : (typeof A.name === 'string' ? (A.name as string) : undefined); if (!txt) throw new Error('click_button_like requires text or name'); const exact = !!A.exact; const hints = Array.isArray(A.selector_hints) ? (A.selector_hints as string[]) : []; const t = Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2); await withRetry(async () => { const loc = await this._findButtonLike(txt, { exact, hints }); await this._reliableClick(loc, { timeout: t, button: 'left' }); }, { retries: 2, delayMs: 200 }); break; }
-  case 'click_image_like': { const txt = typeof A.text === 'string' ? (A.text as string) : (typeof A.name === 'string' ? (A.name as string) : (typeof A.alt === 'string' ? (A.alt as string) : undefined)); const src = typeof A.src === 'string' ? (A.src as string) : undefined; if (!txt && !src) throw new Error('click_image_like requires text/alt/name or src'); const exact = !!A.exact; const t = Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2); await withRetry(async () => { const loc = await this._findImageLike({ text: txt, src, exact }); await this._reliableClick(loc, { timeout: t, button: 'left' }); }, { retries: 2, delayMs: 200 }); break; }
+  case 'click_button_like': { const txt = typeof A.text === 'string' ? (A.text as string) : (typeof A.name === 'string' ? (A.name as string) : undefined); if (!txt) throw new Error('click_button_like requires text or name'); const exact = !!A.exact; const hints = Array.isArray(A.selector_hints) ? (A.selector_hints as string[]) : []; const t = Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2); await withRetry(async () => { const loc = await this._findButtonLike(txt, { exact, hints }); await this._reliableClick(loc, { timeout: t, button: 'left' }); }); break; }
+  case 'click_image_like': { const txt = typeof A.text === 'string' ? (A.text as string) : (typeof A.name === 'string' ? (A.name as string) : (typeof A.alt === 'string' ? (A.alt as string) : undefined)); const src = typeof A.src === 'string' ? (A.src as string) : undefined; if (!txt && !src) throw new Error('click_image_like requires text/alt/name or src'); const exact = !!A.exact; const t = Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2); await withRetry(async () => { const loc = await this._findImageLike({ text: txt, src, exact }); await this._reliableClick(loc, { timeout: t, button: 'left' }); }); break; }
         case 'wait_for_network_idle': { await this.page!.waitForLoadState('networkidle', { timeout: Math.min((A.timeout_ms as number | undefined) || this.navTimeoutMs, this.navTimeoutMs) }).catch(() => {}); break; }
-        case 'fill_field': { if (typeof A.text !== 'string') throw new Error('fill_field requires text'); await this._ensurePageReady().catch(() => {}); let locRes: { locator: Locator } | null = await this.resolveLocator(A.locator as Record<string, unknown>).catch(() => null); let locator: Locator | null = locRes?.locator ?? null; const t = Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2); await withRetry(async () => { if (!locator) { locator = await this._fallbackInputLocator(A.locator as Record<string, unknown>, t).catch(() => null); } if (!locator) throw new Error('Input locator not found'); await locator.scrollIntoViewIfNeeded().catch(() => {}); await locator.waitFor({ state: 'visible', timeout: t }).catch(() => {}); await locator.click({ timeout: t }).catch(() => {}); await locator.fill('', { timeout: t }).catch(() => {}); await locator.fill(A.text as string, { timeout: t }); }, { retries: 2, delayMs: 300 }); break; }
+        case 'fill_field': { 
+          if (typeof A.text !== 'string') throw new Error('fill_field requires text'); 
+          await this._ensurePageReady().catch(() => {}); 
+          let locRes: { locator: Locator } | null = await this.resolveLocator(A.locator as Record<string, unknown>).catch(() => null); 
+          let locator: Locator | null = locRes?.locator ?? null; 
+          const t = this._getAdaptiveTimeout('type', Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2)); 
+          await withRetry(async () => { 
+            if (!locator) { 
+              locator = await this._fallbackInputLocator(A.locator as Record<string, unknown>, t).catch(() => null); 
+            } 
+            if (!locator) throw new Error('Input locator not found'); 
+            await this._prepareElementForInteraction(locator, t);
+            await locator.waitFor({ state: 'visible', timeout: t }).catch(() => {}); 
+            await locator.click({ timeout: t }).catch(() => {}); 
+            await locator.fill('', { timeout: t }).catch(() => {}); 
+            await locator.fill(A.text as string, { timeout: t }); 
+          }); 
+          break; 
+        }
         case 'hover_element': { const { locator } = await this.resolveLocator(A.locator as Record<string, unknown>); const t = Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2); await withRetry(() => locator.hover({ timeout: t })); break; }
         case 'focus_element': { const { locator } = await this.resolveLocator(A.locator as Record<string, unknown>); const t = Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2); await withRetry(() => locator.focus({ timeout: t })); break; }
         case 'press_on': { if (typeof A.key === 'undefined') throw new Error('press_on requires key'); const { locator } = await this.resolveLocator(A.locator as Record<string, unknown>); const keyStr = String(A.key); const key = this.keyMap[keyStr] || keyStr; const t = Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2); await withRetry(() => locator.press(key, { timeout: t })); break; }
@@ -747,7 +1053,13 @@ ${context}` },
         case 'assert_text': { const { locator } = await this.resolveLocator(A.locator as Record<string, unknown>); if (typeof A.expected === 'undefined') throw new Error('assert_text requires expected'); const t = Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2); const txt = (await locator.first().innerText({ timeout: t })).trim(); const expectedStr = String(A.expected); const match = A.exact ? (txt === expectedStr) : txt.includes(expectedStr); if (!match) throw new Error(`Text assertion failed. Expected ${A.exact ? 'exact' : 'contains'} "${expectedStr}", got "${txt}"`); break; }
         case 'assert_url': { const url = this.page!.url(); if (typeof A.url_equals !== 'undefined' && url !== String(A.url_equals)) throw new Error(`URL equals failed. Expected "${String(A.url_equals)}", got "${url}"`); if (typeof A.url_contains !== 'undefined' && !url.includes(String(A.url_contains))) throw new Error(`URL contains failed. Expected contains "${String(A.url_contains)}", got "${url}"`); break; }
         case 'assert_title': { const title = await this.page!.title(); if (typeof A.title_equals !== 'undefined' && title !== String(A.title_equals)) throw new Error(`Title equals failed. Expected "${String(A.title_equals)}", got "${title}"`); if (typeof A.title_contains !== 'undefined' && !title.includes(String(A.title_contains))) throw new Error(`Title contains failed. Expected contains "${String(A.title_contains)}", got "${title}"`); break; }
-        case 'wait_for_element': { const { locator } = await this.resolveLocator(A.locator as Record<string, unknown>); const state = (A.state as 'visible'|'hidden'|'attached'|'detached') || 'visible'; const t = Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2); await locator.first().waitFor({ state, timeout: t }); break; }
+        case 'wait_for_element': { 
+          const { locator } = await this.resolveLocator(A.locator as Record<string, unknown>); 
+          const state = (A.state as 'visible'|'hidden'|'attached'|'detached') || 'visible'; 
+          const t = this._getAdaptiveTimeout('wait_for_element', Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2)); 
+          await locator.first().waitFor({ state, timeout: t }); 
+          break; 
+        }
         case 'mouse_down': { const btnStr = String(A.button || 'left'); const btn = (['left','middle','right'].includes(btnStr) ? (btnStr as 'left'|'middle'|'right') : 'left'); const coords = (A.coordinates || {}) as { x?: unknown; y?: unknown }; let x = 0, y = 0; if (typeof coords.x !== 'undefined' && typeof coords.y !== 'undefined') ({ x, y } = this.validateCoordinates(Number(coords.x), Number(coords.y))); if (typeof x === 'number' && typeof y === 'number') await this._withTimeout(() => this.page!.mouse.move(x, y), this.actionTimeoutMs, 'mouse_move'); await this._withTimeout(() => this.page!.mouse.down({ button: btn }), this.actionTimeoutMs, 'mouse_down'); break; }
         case 'mouse_up': { const btnStr = String(A.button || 'left'); const btn = (['left','middle','right'].includes(btnStr) ? (btnStr as 'left'|'middle'|'right') : 'left'); await this._withTimeout(() => this.page!.mouse.up({ button: btn }), this.actionTimeoutMs, 'mouse_up'); break; }
         case 'mouse_move': { const coords = (A.coordinates || {}) as { x?: unknown; y?: unknown }; if (typeof coords.x !== 'undefined' && typeof coords.y !== 'undefined') { const { x, y } = this.validateCoordinates(Number(coords.x), Number(coords.y)); await this._withTimeout(() => this.page!.mouse.move(x, y, { steps: 1 }), this.actionTimeoutMs, 'mouse_move'); } break; }
@@ -878,10 +1190,12 @@ ${context}` },
   }
 
   private async _reliableClick(locator: Locator, opts: { timeout: number; button?: 'left' | 'middle' | 'right' }): Promise<void> {
-    const t = Math.max(500, Math.min(opts.timeout, this.actionTimeoutMs * 2));
+    const t = this._getAdaptiveTimeout('click', opts.timeout);
     await this._ensurePageReady().catch(() => {});
     const target = locator.first();
-    await target.scrollIntoViewIfNeeded().catch(() => {});
+    
+    // Enhanced element preparation with multiple strategies
+    await this._prepareElementForInteraction(target, t);
     await target.waitFor({ state: 'visible', timeout: t }).catch(() => {});
     const button = opts.button || 'left';
     const getClickableAncestorHandle = async () => {
@@ -1056,18 +1370,429 @@ ${context}` },
     throw new Error(`Button-like element not found for text: ${text}`);
   }
 
-  async _ensurePageReady(): Promise<void> {
-    await this.initializeBrowser(); if (!this.page) return; try { const url = this.page.url(); if (/\.bing\./i.test(url)) { const selectors = ['#bnp_btn_accept','button#bnp_btn_accept','button[aria-label*="Accept"]','button:has-text("Accept")','button[role="button"]:has-text("Accept")']; for (const sel of selectors) { const btn = this.page.locator(sel).first(); if (await btn.count().catch(() => 0)) { const vis = await btn.isVisible().catch(() => false); if (vis) { await btn.click({ timeout: 1000 }).catch(() => {}); break; } } } } } catch {}
-    await this._withTimeout(() => this.page!.waitForLoadState('domcontentloaded', { timeout: 2000 }), 2200, 'wait_dom').catch(() => {});
+  private async _prepareElementForInteraction(locator: Locator, timeout: number): Promise<void> {
+    try {
+      // Strategy 1: Basic scroll and wait
+      await locator.scrollIntoViewIfNeeded({ timeout: Math.min(timeout / 4, 2000) }).catch(() => {});
+      
+      // Strategy 2: Wait for element to be stable (not moving)
+      await this._waitForElementStability(locator, timeout / 4);
+      
+      // Strategy 3: Handle lazy loading by triggering visibility
+      await this._triggerLazyLoading(locator);
+      
+      // Strategy 4: Wait for potential animations to complete
+      await this.delay(200);
+      
+    } catch (error) {
+      console.warn('Element preparation failed:', error);
+    }
   }
 
-  async _fallbackInputLocator(spec: Record<string, unknown> = {}, _timeoutMs = 5000): Promise<Locator> {
-    await this.initializeBrowser(); const page = this.page!; const s = spec as Record<string, unknown>; const exact = !!s.exact; const candidates: string[] = [];
-    if (s && typeof s.role === 'string' && /searchbox/i.test(s.role)) { candidates.push('input[role="searchbox"]','input[type="search"]','input[name="q"]','input[name="p"]','input#sb_form_q','textarea[role="searchbox"]'); }
-    if (typeof s.placeholder === 'string') { candidates.push(`input[placeholder*="${s.placeholder}"]`, `textarea[placeholder*="${s.placeholder}"]`); }
-    if (typeof s.label === 'string') { try { const labelLoc = page.getByLabel(s.label, { exact }); await labelLoc.first().waitFor({ state: 'attached', timeout: 800 }).catch(() => {}); if (await labelLoc.count().catch(() => 0)) return labelLoc.first(); } catch {} }
-    for (const sel of candidates) { try { const loc = page.locator(sel).first(); await loc.waitFor({ state: 'attached', timeout: 800 }).catch(() => {}); if (await loc.count().catch(() => 0)) return loc; } catch {} }
-    try { const firstTextInput = page.locator('input[type="text"], input:not([type]), textarea').filter({ hasNot: page.locator('[disabled]') }).first(); await firstTextInput.waitFor({ state: 'visible', timeout: 800 }).catch(() => {}); if (await firstTextInput.count().catch(() => 0)) return firstTextInput; } catch {}
-    throw new Error('No fallback input found');
+  private async _waitForElementStability(locator: Locator, timeout: number): Promise<void> {
+    const maxAttempts = 5;
+    let prevBox: { x: number; y: number; width: number; height: number } | null = null;
+    
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const box = await locator.boundingBox({ timeout: timeout / maxAttempts });
+        if (!box) break;
+        
+        if (prevBox && 
+            Math.abs(box.x - prevBox.x) < 1 && 
+            Math.abs(box.y - prevBox.y) < 1 &&
+            Math.abs(box.width - prevBox.width) < 1 &&
+            Math.abs(box.height - prevBox.height) < 1) {
+          return; // Element is stable
+        }
+        
+        prevBox = box;
+        await this.delay(100);
+      } catch {
+        break;
+      }
+    }
+  }
+
+  private async _triggerLazyLoading(locator: Locator): Promise<void> {
+    try {
+      // Hover to trigger any lazy loading
+      await locator.hover({ timeout: 1000 }).catch(() => {});
+      
+      // Scroll near the element to trigger intersection observers
+      await locator.scrollIntoViewIfNeeded().catch(() => {});
+      
+      // Wait a bit for lazy content to load
+      await this.delay(300);
+    } catch {
+      // Ignore errors in lazy loading triggers
+    }
+  }
+
+  private _getAdaptiveTimeout(action: string, baseTimeout: number): number {
+    const actionMultipliers = {
+      'click': 1.0,
+      'type': 1.5,
+      'navigate': 3.0,
+      'wait_for_element': 2.0,
+      'complex_interaction': 2.5
+    };
+    
+    let multiplier = actionMultipliers[action as keyof typeof actionMultipliers] || 1.0;
+    
+    // Adjust for network conditions
+    if (this.networkConditions.slow) multiplier *= 1.5;
+    if (this.networkConditions.unstable) multiplier *= 1.3;
+    
+    const adaptiveTimeout = Math.max(500, Math.min(baseTimeout * multiplier, this.actionTimeoutMs * 3));
+    this.adaptiveTimeouts.set(action, adaptiveTimeout);
+    
+    return adaptiveTimeout;
+  }
+
+  async _ensurePageReady(): Promise<void> {
+    await this.initializeBrowser();
+    if (!this.page) return;
+    
+    try {
+      // Enhanced page readiness with multiple strategies
+      await this._waitForPageStability();
+      await this._handleCommonPageOverlays();
+      await this._waitForDynamicContent();
+      
+    } catch (error) {
+      console.warn('Page readiness check failed:', error);
+    }
+  }
+
+  private async _waitForPageStability(): Promise<void> {
+    if (!this.page) return;
+    
+    try {
+      // Wait for DOM to be ready
+      await this._withTimeout(
+        () => this.page!.waitForLoadState('domcontentloaded', { timeout: 3000 }),
+        3200,
+        'wait_dom'
+      ).catch(() => {});
+      
+      // Wait for network to settle
+      await this._withTimeout(
+        () => this.page!.waitForLoadState('networkidle', { timeout: 2000 }),
+        2200,
+        'wait_network'
+      ).catch(() => {});
+      
+      // Wait for any remaining JavaScript execution
+      await this.delay(500);
+      
+    } catch (error) {
+      console.warn('Page stability check failed:', error);
+    }
+  }
+
+  private async _handleCommonPageOverlays(): Promise<void> {
+    if (!this.page) return;
+    
+    const url = this.page.url();
+    
+    // Handle cookie consent banners
+    const cookieSelectors = [
+      'button:has-text("Accept")',
+      'button:has-text("Allow")',
+      'button:has-text("I agree")',
+      'button:has-text("OK")',
+      '[id*="cookie"] button',
+      '[class*="cookie"] button',
+      '[aria-label*="Accept"]',
+      '#bnp_btn_accept', // Bing specific
+      'button#bnp_btn_accept',
+      'button[aria-label*="Accept"]'
+    ];
+    
+    for (const selector of cookieSelectors) {
+      try {
+        const element = this.page.locator(selector).first();
+        if (await element.count() > 0 && await element.isVisible({ timeout: 1000 })) {
+          await element.click({ timeout: 2000 }).catch(() => {});
+          await this.delay(500);
+          break;
+        }
+      } catch {
+        continue;
+      }
+    }
+    
+    // Handle common modal/popup overlays
+    const overlaySelectors = [
+      '[role="dialog"] button:has-text("Close")',
+      '[role="dialog"] button:has-text("×")',
+      '.modal button:has-text("Close")',
+      '.popup button:has-text("×")',
+      '[class*="overlay"] button',
+      '[data-dismiss="modal"]'
+    ];
+    
+    for (const selector of overlaySelectors) {
+      try {
+        const element = this.page.locator(selector).first();
+        if (await element.count() > 0 && await element.isVisible({ timeout: 500 })) {
+          await element.click({ timeout: 1000 }).catch(() => {});
+          await this.delay(300);
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  private async _waitForDynamicContent(): Promise<void> {
+    if (!this.page) return;
+    
+    try {
+      // Wait for common dynamic content indicators to settle
+      const loadingSelectors = [
+        '[class*="loading"]',
+        '[class*="spinner"]',
+        '[class*="skeleton"]',
+        '[aria-label*="loading"]',
+        '.loading',
+        '.spinner'
+      ];
+      
+      // Wait for loading indicators to disappear
+      for (const selector of loadingSelectors) {
+        try {
+          await this.page.waitForSelector(selector, { state: 'hidden', timeout: 3000 }).catch(() => {});
+        } catch {
+          continue;
+        }
+      }
+      
+      // Wait for common content containers to appear
+      const contentSelectors = [
+        'main',
+        '[role="main"]',
+        '#main',
+        '.main-content',
+        '.content',
+        'article'
+      ];
+      
+      let contentFound = false;
+      for (const selector of contentSelectors) {
+        try {
+          const element = this.page.locator(selector).first();
+          if (await element.count() > 0) {
+            await element.waitFor({ state: 'visible', timeout: 2000 }).catch(() => {});
+            contentFound = true;
+            break;
+          }
+        } catch {
+          continue;
+        }
+      }
+      
+      // If no main content found, wait a bit longer for SPA to load
+      if (!contentFound) {
+        await this.delay(1000);
+      }
+      
+    } catch (error) {
+      console.warn('Dynamic content wait failed:', error);
+    }
+  }
+
+  async _fallbackInputLocator(spec: Record<string, unknown> = {}, timeoutMs = 5000): Promise<Locator> {
+    await this.initializeBrowser();
+    const page = this.page!;
+    const s = spec as Record<string, unknown>;
+    const exact = !!s.exact;
+    
+    // Enhanced fallback strategies with multiple approaches
+    const strategies = [
+      // Strategy 1: Role-based with enhanced searching
+      () => this._findByRoleEnhanced(s, page, exact),
+      
+      // Strategy 2: Semantic attributes (placeholder, label, etc.)
+      () => this._findBySemanticAttributes(s, page, exact),
+      
+      // Strategy 3: Visual context and positioning
+      () => this._findByVisualContext(s, page),
+      
+      // Strategy 4: Generic input fallback with smart filtering
+      () => this._findGenericInputs(page),
+      
+      // Strategy 5: Alternative input methods (contenteditable, etc.)
+      () => this._findAlternativeInputs(page)
+    ];
+    
+    for (const strategy of strategies) {
+      try {
+        const locator = await strategy();
+        if (locator && await locator.count() > 0) {
+          await locator.waitFor({ state: 'visible', timeout: Math.min(timeoutMs / strategies.length, 2000) }).catch(() => {});
+          return locator;
+        }
+      } catch {
+        continue;
+      }
+    }
+    
+    throw new Error('No fallback input found with enhanced strategies');
+  }
+
+  private async _findByRoleEnhanced(spec: Record<string, unknown>, page: Page, exact: boolean): Promise<Locator | null> {
+    if (spec.role && typeof spec.role === 'string') {
+      const roleQueries = [
+        () => page.getByRole(spec.role as any, { exact }),
+        () => page.locator(`[role="${spec.role}"]`),
+        () => page.locator(`input[role="${spec.role}"]`),
+        () => page.locator(`textarea[role="${spec.role}"]`)
+      ];
+      
+      for (const query of roleQueries) {
+        try {
+          const locator = query();
+          if (await locator.count() > 0) return locator.first();
+        } catch {
+          continue;
+        }
+      }
+    }
+    return null;
+  }
+
+  private async _findBySemanticAttributes(spec: Record<string, unknown>, page: Page, exact: boolean): Promise<Locator | null> {
+    const candidates: string[] = [];
+    
+    // Placeholder-based search
+    if (typeof spec.placeholder === 'string') {
+      const placeholder = spec.placeholder;
+      candidates.push(
+        `input[placeholder*="${placeholder}"]`,
+        `textarea[placeholder*="${placeholder}"]`,
+        `input[placeholder="${placeholder}"]`,
+        `textarea[placeholder="${placeholder}"]`
+      );
+    }
+    
+    // Label-based search with enhanced strategies
+    if (typeof spec.label === 'string') {
+      try {
+        const labelLoc = page.getByLabel(spec.label, { exact });
+        if (await labelLoc.count() > 0) return labelLoc.first();
+      } catch {}
+      
+      // Alternative label approaches
+      candidates.push(
+        `input[aria-label*="${spec.label}"]`,
+        `textarea[aria-label*="${spec.label}"]`,
+        `input[title*="${spec.label}"]`,
+        `textarea[title*="${spec.label}"]`
+      );
+    }
+    
+    // Name and ID based search
+    if (typeof spec.name === 'string') {
+      candidates.push(
+        `input[name="${spec.name}"]`,
+        `textarea[name="${spec.name}"]`,
+        `input[name*="${spec.name}"]`,
+        `textarea[name*="${spec.name}"]`
+      );
+    }
+    
+    for (const selector of candidates) {
+      try {
+        const loc = page.locator(selector).first();
+        if (await loc.count() > 0) return loc;
+      } catch {
+        continue;
+      }
+    }
+    
+    return null;
+  }
+
+  private async _findByVisualContext(spec: Record<string, unknown>, page: Page): Promise<Locator | null> {
+    // Find inputs near text labels or descriptions
+    if (typeof spec.text === 'string' || typeof spec.label === 'string') {
+      const searchText = spec.text || spec.label;
+      
+      try {
+        // Look for inputs following text elements
+        const textElements = page.locator(`text="${searchText}"`);
+        const nearbyInputs = textElements.locator('.. input, .. textarea, + input, + textarea');
+        
+        if (await nearbyInputs.count() > 0) {
+          return nearbyInputs.first();
+        }
+        
+        // Look for inputs in same container as text
+        const containers = page.locator(`:has-text("${searchText}")`);
+        const containerInputs = containers.locator('input, textarea').first();
+        
+        if (await containerInputs.count() > 0) {
+          return containerInputs;
+        }
+      } catch {
+        // Continue to next strategy
+      }
+    }
+    
+    return null;
+  }
+
+  private async _findGenericInputs(page: Page): Promise<Locator | null> {
+    const inputSelectors = [
+      'input[type="text"]:visible',
+      'input:not([type]):visible',
+      'textarea:visible',
+      'input[type="email"]:visible',
+      'input[type="search"]:visible',
+      'input[type="password"]:visible',
+      '[contenteditable="true"]:visible'
+    ];
+    
+    for (const selector of inputSelectors) {
+      try {
+        const locator = page.locator(selector).filter({ hasNot: page.locator('[disabled]') });
+        if (await locator.count() > 0) {
+          // Prefer visible and interactable inputs
+          const visibleInputs = locator.filter({ hasNot: page.locator('[readonly]') });
+          return await visibleInputs.count() > 0 ? visibleInputs.first() : locator.first();
+        }
+      } catch {
+        continue;
+      }
+    }
+    
+    return null;
+  }
+
+  private async _findAlternativeInputs(page: Page): Promise<Locator | null> {
+    const altSelectors = [
+      '[contenteditable="true"]',
+      '[role="textbox"]',
+      '.input',
+      '.textbox',
+      '[data-testid*="input"]',
+      '[data-cy*="input"]',
+      '[class*="input"]:not(button)'
+    ];
+    
+    for (const selector of altSelectors) {
+      try {
+        const locator = page.locator(selector).first();
+        if (await locator.count() > 0 && await locator.isVisible({ timeout: 500 })) {
+          return locator;
+        }
+      } catch {
+        continue;
+      }
+    }
+    
+    return null;
   }
 }

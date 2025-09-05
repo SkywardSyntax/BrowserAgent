@@ -93,6 +93,7 @@ app.get('/api/info', (_req, res) => {
       model: browserAgent.deploymentName,
       viewport: { width: browserAgent.displayWidth, height: browserAgent.displayHeight },
       headless: browserAgent.getHeadless(),
+      reasoningEffort: (browserAgent as any).reasoningEffort || null,
       wsUrl: `ws://localhost:${PORT}`,
     });
   } catch (error) {

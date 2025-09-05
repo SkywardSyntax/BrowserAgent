@@ -48,6 +48,7 @@ export class TaskStateMachine extends StateMachine<TaskState> {
         { from: TaskState.PAUSED, to: TaskState.RUNNING, event: 'RESUME' },
         { from: TaskState.MANUAL_CONTROL, to: TaskState.RUNNING, event: 'AI_TAKEOVER' },
         { from: TaskState.MANUAL_CONTROL, to: TaskState.PAUSED, event: 'PAUSE' },
+        { from: TaskState.MANUAL_CONTROL, to: TaskState.RUNNING, event: 'RESUME' },
         // Stop transitions from any active state
         { from: TaskState.RUNNING, to: TaskState.STOPPING, event: 'STOP' },
         { from: TaskState.PAUSED, to: TaskState.STOPPING, event: 'STOP' },
