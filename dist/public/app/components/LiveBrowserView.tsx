@@ -19,7 +19,7 @@ export function LiveBrowserView(): HTMLDivElement & {
   badge.innerHTML = '<span class="dot inline-block align-middle"></span> <span class="align-middle">Live Browser</span>';
   const hint = document.createElement('div');
   hint.className = 'muted small subtle text-[12px]';
-  hint.textContent = 'Auto-updates as the agent acts';
+  hint.textContent = 'Auto-updates live';
 
   const spacer = document.createElement('div');
   spacer.style.flex = '1';
@@ -44,6 +44,7 @@ export function LiveBrowserView(): HTMLDivElement & {
   let expanded = false;
   let isEditingAddr = false;
   let pendingNavUrl: string | null = null;
+  let screenshotInterval: number | null = null;
 
   const refresh = btn('Refresh', 'Fetch latest screenshot', async () => {
     if (!currentTask) return;
@@ -364,6 +365,8 @@ export function LiveBrowserView(): HTMLDivElement & {
 
   function setTask(task: Task | null): void {
     currentTask = task;
+    // Start/stop passive screenshot refresh when not streaming
+    try { if (screenshotInterval) { clearInterval(screenshotInterval); screenshotInterval = null; } } catch {}
     if (!task) {
       last.textContent = '';
       return;
@@ -373,6 +376,23 @@ export function LiveBrowserView(): HTMLDivElement & {
     if (manual && socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'startScreencast', taskId: task.id }));
     }
+    // Poll live screenshot periodically to keep preview fresh even when AI is thinking
+    const poll = async () => {
+      if (!currentTask || streamActive) return;
+      try {
+        const res = await fetch(`/api/screenshot?_=${Date.now()}`);
+        if (!res.ok) return;
+        const blob = await res.blob();
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const b64 = String(reader.result).split(',')[1] || '';
+          if (b64) update(b64);
+        };
+        reader.readAsDataURL(blob);
+      } catch {}
+    };
+    void poll();
+    screenshotInterval = window.setInterval(poll, 2000);
   }
 
   function update(base64Png: string): void {

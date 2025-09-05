@@ -65,6 +65,12 @@ NODE_ENV=development
 DISPLAY_WIDTH=1280
 DISPLAY_HEIGHT=720
 BROWSER_HEADLESS=false
+
+# Reasoning Models (optional)
+# Set only if your selected model supports reasoning. Allowed: low | medium | high
+# If unset or empty, the system assumes the model is NOT reasoning-capable and will not
+# send the reasoning parameter in API calls.
+# REASONING_EFFORT=medium
 ```
 
 ## API Endpoints
@@ -93,6 +99,16 @@ Connect to `ws://localhost:3001` to receive real-time updates:
 4. **Execution**: Playwright executes the planned actions (clicks, typing, navigation)
 5. **Feedback Loop**: Screenshots are taken and sent back to AI for next steps
 6. **Completion**: Process continues until task is completed or stopped
+
+### Using Reasoning Models
+
+If you deploy a reasoning-capable model, you can opt-in by setting `REASONING_EFFORT` in your `.env` to one of:
+
+- `low`
+- `medium`
+- `high`
+
+When set, the server includes a `reasoning.effort` hint on AI requests. When not set (default), the hint is omitted so non-reasoning models work normally. You can verify the current setting by calling `GET /api/info` which returns `reasoningEffort`.
 
 ## Example Tasks
 
