@@ -161,11 +161,29 @@ app.post('/api/tasks/:taskId/action', async (req, res) => {
   }
 });
 
-app.post('/api/tasks/:taskId/pause', (req, res) => {
+app.post('/api/tasks/:taskId/pause', async (req, res) => {
   try {
     const { taskId } = req.params as { taskId: string };
-    const success = taskManager.pauseTask(taskId);
-    if (!success) return res.status(404).json({ error: 'Task not found' });
+    
+    // Use state machine to properly pause the task
+    const task = taskManager.getTask(taskId);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    
+    // Try to transition through state machine first, then fallback to TaskManager
+    try {
+      const taskStateMachine = (browserAgent as any).getOrCreateTaskStateMachine(taskId);
+      const success = await taskStateMachine.pause();
+      if (!success) {
+        // Fallback to direct TaskManager call
+        const fallbackSuccess = taskManager.pauseTask(taskId);
+        if (!fallbackSuccess) return res.status(404).json({ error: 'Task not found or cannot be paused' });
+      }
+    } catch {
+      // Fallback to direct TaskManager call
+      const success = taskManager.pauseTask(taskId);
+      if (!success) return res.status(404).json({ error: 'Task not found' });
+    }
+    
     res.json({ status: 'paused' });
   } catch (error) {
     // eslint-disable-next-line no-console
@@ -174,12 +192,34 @@ app.post('/api/tasks/:taskId/pause', (req, res) => {
   }
 });
 
-app.post('/api/tasks/:taskId/resume', (req, res) => {
+app.post('/api/tasks/:taskId/resume', async (req, res) => {
   try {
     const { taskId } = req.params as { taskId: string };
-    const success = taskManager.resumeTask(taskId);
-    if (!success) return res.status(404).json({ error: 'Task not found' });
-    browserAgent.processTask(taskId);
+    
+    // Use state machine to properly resume the task
+    const task = taskManager.getTask(taskId);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    
+    // Try to transition through state machine first, then fallback to TaskManager
+    try {
+      const taskStateMachine = (browserAgent as any).getOrCreateTaskStateMachine(taskId);
+      const success = await taskStateMachine.resume();
+      if (!success) {
+        // Fallback to direct TaskManager call
+        const fallbackSuccess = taskManager.resumeTask(taskId);
+        if (!fallbackSuccess) return res.status(404).json({ error: 'Task not found or cannot be resumed' });
+      }
+    } catch {
+      // Fallback to direct TaskManager call
+      const success = taskManager.resumeTask(taskId);
+      if (!success) return res.status(404).json({ error: 'Task not found' });
+    }
+    
+    // Only restart processing if not already processing and in a resumable state
+    if (!browserAgent.processingTasks || !browserAgent.processingTasks.has(taskId)) {
+      browserAgent.processTask(taskId);
+    }
+    
     res.json({ status: 'resumed' });
   } catch (error) {
     // eslint-disable-next-line no-console
@@ -226,8 +266,27 @@ wss.on('connection', (ws: WebSocket & { taskId?: string; _stopStream?: () => voi
           const r = data as Record<string, unknown>;
           const t = typeof r.taskId === 'string' ? (r.taskId as string) : undefined;
           if (t) {
-            taskManager.pauseTask(t);
-            ws.send(JSON.stringify({ type: 'takeoverGranted', taskId: t }));
+            // Use state machine for proper manual control transition
+            const success = await browserAgent.requestManualControl(t);
+            if (success) {
+              ws.send(JSON.stringify({ type: 'takeoverGranted', taskId: t }));
+            } else {
+              ws.send(JSON.stringify({ type: 'takeoverDenied', taskId: t, reason: 'Unable to transition to manual control' }));
+            }
+          }
+          break;
+        }
+        case 'releaseControl': {
+          const r = data as Record<string, unknown>;
+          const t = typeof r.taskId === 'string' ? (r.taskId as string) : undefined;
+          if (t) {
+            // Use state machine to release manual control back to AI
+            const success = await browserAgent.releaseManualControl(t);
+            if (success) {
+              ws.send(JSON.stringify({ type: 'controlReleased', taskId: t }));
+            } else {
+              ws.send(JSON.stringify({ type: 'controlReleaseFailed', taskId: t, reason: 'Unable to release manual control' }));
+            }
           }
           break;
         }

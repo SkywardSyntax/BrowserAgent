@@ -3,6 +3,7 @@ import type { CDPSession } from 'playwright-core';
 import { OpenAI } from 'openai';
 import type { TaskManager, Task } from './taskManager';
 import { createHash } from 'crypto';
+import { TaskStateMachine, BrowserControlStateMachine, LoopStateMachine, TaskState, BrowserControlState, LoopState } from './taskStateMachines';
 
 type KeyMap = Record<string, string>;
 
@@ -27,6 +28,10 @@ export class BrowserAgent {
   private _unsubscribeTM: () => void;
   consecutiveFailures: Map<string, number>;
   private taskLoopState: Map<string, { lastFingerprint?: string; unchangedCount: number; lastActionKey?: string; repeatCount: number; remediationCount: number }>;
+  
+  // State machines for better control flow
+  private taskStateMachines: Map<string, TaskStateMachine>;
+  private browserControlSM: BrowserControlStateMachine;
 
   constructor(taskManager: TaskManager) {
     this.taskManager = taskManager;
@@ -36,7 +41,11 @@ export class BrowserAgent {
     this.headless = undefined;
     this.abortControllers = new Map();
     this.consecutiveFailures = new Map();
-  this.taskLoopState = new Map();
+    this.taskLoopState = new Map();
+    
+    // Initialize state machines
+    this.taskStateMachines = new Map();
+    this.browserControlSM = new BrowserControlStateMachine();
 
     this.openai = new OpenAI({
       baseURL: (process.env.AZURE_OPENAI_ENDPOINT || '') + 'openai/v1/',
@@ -189,6 +198,35 @@ export class BrowserAgent {
   }
   getHeadless(): boolean { return typeof this.headless === 'boolean' ? this.headless : this.resolveHeadless(); }
 
+  // State machine helper methods
+  getOrCreateTaskStateMachine(taskId: string): TaskStateMachine {
+    if (!this.taskStateMachines.has(taskId)) {
+      const taskSM = new TaskStateMachine(taskId, this.taskManager);
+      this.taskStateMachines.set(taskId, taskSM);
+      
+      // Clean up when task is finished
+      taskSM.on('enter:completed', () => this.taskStateMachines.delete(taskId));
+      taskSM.on('enter:failed', () => this.taskStateMachines.delete(taskId));
+    }
+    return this.taskStateMachines.get(taskId)!;
+  }
+
+  async requestManualControl(taskId: string): Promise<boolean> {
+    const taskSM = this.getOrCreateTaskStateMachine(taskId);
+    if (taskSM.isRunning() && await taskSM.takeManualControl()) {
+      return await this.browserControlSM.requestManualControl();
+    }
+    return false;
+  }
+
+  async releaseManualControl(taskId: string): Promise<boolean> {
+    const taskSM = this.getOrCreateTaskStateMachine(taskId);
+    if (taskSM.isInManualControl() && await taskSM.giveControlToAI()) {
+      return await this.browserControlSM.requestAIControl();
+    }
+    return false;
+  }
+
   async getPageState(): Promise<{ url: string; title: string; headless: boolean; viewport: { width: number; height: number } }> {
     try {
       await this.initializeBrowser();
@@ -202,22 +240,44 @@ export class BrowserAgent {
   }
 
   async processTask(taskId: string): Promise<void> {
-    if (this.processingTasks.has(taskId)) { console.log(`Task ${taskId} is already being processed`); return; }
+    if (this.processingTasks.has(taskId)) { 
+      console.log(`Task ${taskId} is already being processed`); 
+      return; 
+    }
+    
     this.processingTasks.add(taskId);
+    const taskSM = this.getOrCreateTaskStateMachine(taskId);
+    
     try {
       const task = this.taskManager.getTask(taskId);
       if (!task) throw new Error('Task not found');
+      
       console.log(`Starting to process task: ${taskId}`);
-      this.taskManager.updateTask(taskId, { status: 'running' } as Partial<Task>);
+      
+      // Use state machine for proper state transitions
+      await taskSM.start();
+      
+      // Initialize browser and take initial screenshot
       await this.initializeBrowser();
-      if (this.page!.url() === 'about:blank') { await this.page!.goto('https://www.google.com'); }
+      if (this.page!.url() === 'about:blank') { 
+        await this.page!.goto('https://www.google.com'); 
+      }
+      
       const initialScreenshot = await this.takeScreenshot();
       this.taskManager.addScreenshot(taskId, initialScreenshot);
-      await this.aiProcessingLoop(taskId);
+      
+      await taskSM.initialize();
+      
+      // Start the AI processing loop with state machine control
+      await this.aiProcessingLoopWithStateMachine(taskId);
+      
     } catch (error) {
       console.error(`Error processing task ${taskId}:`, error);
+      await taskSM.fail();
       this.taskManager.failTask(taskId, error);
-    } finally { this.processingTasks.delete(taskId); }
+    } finally { 
+      this.processingTasks.delete(taskId); 
+    }
   }
 
   async aiProcessingLoop(taskId: string): Promise<void> {
@@ -267,6 +327,181 @@ export class BrowserAgent {
       }
     }
     if (iterations >= maxIterations) { this.taskManager.failTask(taskId, 'Maximum iterations reached'); }
+  }
+
+  // New state machine-based processing loop for better reliability and control flow
+  async aiProcessingLoopWithStateMachine(taskId: string): Promise<void> {
+    const taskSM = this.getOrCreateTaskStateMachine(taskId);
+    const loopSM = new LoopStateMachine();
+    const maxIterations = 20;
+    let iterations = 0;
+
+    while (iterations < maxIterations && taskSM.isActive()) {
+      iterations++;
+      
+      // Check for state changes that require breaking out of the loop
+      if (taskSM.isInManualControl()) {
+        console.log(`Task ${taskId} is under manual control, waiting...`);
+        await this.waitForManualControlRelease(taskId);
+        continue;
+      }
+      
+      if (taskSM.isPaused()) {
+        console.log(`Task ${taskId} is paused, waiting...`);
+        await this.waitForResume(taskId);
+        continue;
+      }
+      
+      if (!taskSM.isRunning()) {
+        console.log(`Task ${taskId} is no longer running`);
+        break;
+      }
+
+      // Only proceed if under AI control
+      if (!this.browserControlSM.isUnderAIControl()) {
+        await this.delay(100);
+        continue;
+      }
+
+      try {
+        // Start iteration
+        if (!await loopSM.startIteration()) continue;
+
+        // Take screenshot
+        let screenshot: string;
+        try {
+          screenshot = await this.takeScreenshot();
+          this.taskManager.addScreenshot(taskId, screenshot);
+          await loopSM.screenshotTaken();
+        } catch (error) {
+          console.error('Screenshot failed:', error);
+          await loopSM.screenshotFailed();
+          if (loopSM.shouldAbortLoop()) {
+            await taskSM.fail();
+            this.taskManager.failTask(taskId, 'Too many screenshot failures');
+            break;
+          }
+          continue;
+        }
+
+        // Call AI
+        let response: unknown;
+        try {
+          const task = this.taskManager.getTask(taskId);
+          if (!task) break;
+          
+          response = await this.callAI(task, screenshot);
+          await loopSM.aiResponded();
+        } catch (error) {
+          console.error('AI call failed:', error);
+          await loopSM.aiFailed();
+          if (loopSM.shouldAbortLoop()) {
+            await taskSM.fail();
+            this.taskManager.failTask(taskId, 'Too many AI failures');
+            break;
+          }
+          continue;
+        }
+
+        // Process response
+        try {
+          const { shouldContinue, executed } = await this.processAIResponse(taskId, response);
+          await loopSM.responseProcessed();
+          
+          if (!shouldContinue) {
+            await taskSM.complete();
+            this.taskManager.completeTask(taskId, 'Task completed successfully');
+            break;
+          }
+
+          // Check for progress
+          await this.delay(500);
+          const hasProgress = await this.checkProgress(taskId, executed);
+          
+          if (hasProgress) {
+            await loopSM.iterationComplete();
+          } else {
+            await loopSM.noProgress();
+            if (loopSM.shouldAbortLoop()) {
+              await taskSM.fail();
+              this.taskManager.failTask(taskId, 'No progress after multiple attempts');
+              break;
+            }
+          }
+
+        } catch (error) {
+          console.error('Response processing failed:', error);
+          await loopSM.processingFailed();
+          if (loopSM.shouldAbortLoop()) {
+            await taskSM.fail();
+            this.taskManager.failTask(taskId, 'Too many processing failures');
+            break;
+          }
+        }
+
+        await this.delay(500);
+
+      } catch (error) {
+        console.error(`Error in AI processing loop iteration ${iterations}:`, error);
+        this.taskManager.addStep(taskId, { 
+          type: 'error', 
+          description: `Error: ${(error as Error).message}`, 
+          error: true 
+        });
+
+        if ((error as Error).message.includes('browser') || 
+            (error as Error).message.includes('page')) {
+          await taskSM.fail();
+          throw error;
+        }
+
+        const errName = (error as { name?: string }).name;
+        if (errName === 'AbortError') {
+          await this.waitForResume(taskId);
+        }
+      }
+    }
+
+    if (iterations >= maxIterations && taskSM.isRunning()) {
+      await taskSM.fail();
+      this.taskManager.failTask(taskId, 'Maximum iterations reached');
+    }
+  }
+
+  private async waitForManualControlRelease(taskId: string): Promise<void> {
+    const taskSM = this.getOrCreateTaskStateMachine(taskId);
+    while (taskSM.isInManualControl()) {
+      await this.delay(1000);
+    }
+  }
+
+  private async checkProgress(taskId: string, executed: Array<{ key: string; success: boolean }>): Promise<boolean> {
+    try {
+      const newShot = await this.takeScreenshot().catch(() => null);
+      if (!newShot) return false;
+
+      const newFingerprint = await this._computeFingerprintFromScreenshot(newShot);
+      const state = this.taskLoopState.get(taskId) || { unchangedCount: 0, repeatCount: 0, remediationCount: 0 };
+      
+      // Simple progress detection - if something was executed successfully, assume progress
+      const hasSuccessfulAction = executed.some(action => action.success);
+      
+      if (hasSuccessfulAction) {
+        state.unchangedCount = 0;
+        state.repeatCount = 0;
+        this.taskLoopState.set(taskId, state);
+        return true;
+      }
+
+      // If no successful actions, consider it as no progress
+      state.unchangedCount++;
+      this.taskLoopState.set(taskId, state);
+      return false;
+
+    } catch (error) {
+      console.error('Error checking progress:', error);
+      return false;
+    }
   }
 
   async callAI(task: Task, screenshot: string): Promise<unknown> {
