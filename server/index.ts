@@ -218,6 +218,8 @@ app.post('/api/tasks/:taskId/resume', async (req, res) => {
     
     // Only restart processing if not already processing and in a resumable state
     if (!browserAgent.processingTasks || !browserAgent.processingTasks.has(taskId)) {
+      // eslint-disable-next-line no-console
+      console.log(`[Resume] Kicking AI loop for task ${taskId}`);
       browserAgent.processTask(taskId);
     }
     
@@ -295,6 +297,12 @@ wss.on('connection', (ws: WebSocket & { taskId?: string; _stopStream?: () => voi
             const success = await browserAgent.releaseManualControl(t);
             if (success) ws.send(JSON.stringify({ type: 'controlReleased', taskId: t }));
             else ws.send(JSON.stringify({ type: 'controlReleaseFailed', taskId: t, reason: 'Unable to release manual control' }));
+            // Kick AI loop if needed
+            if (success && (!browserAgent.processingTasks || !browserAgent.processingTasks.has(t))) {
+              // eslint-disable-next-line no-console
+              console.log(`[Control] Kicking AI loop for task ${t} after release via WS`);
+              browserAgent.processTask(t);
+            }
           } catch (e) {
             try { ws.send(JSON.stringify({ type: 'controlReleaseFailed', taskId: t, reason: String((e as Error)?.message || e) })); } catch {}
           }

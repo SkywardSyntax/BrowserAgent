@@ -109,7 +109,10 @@ export function LiveBrowserView(): HTMLDivElement & {
         <button class="overlay-btn" type="button">Take Manual Control</button>
       </div>
     </div>`;
+  // Prevent overlay container from hijacking hover; only the button should be clickable
+  (overlay as HTMLElement).style.pointerEvents = 'none';
   const overlayBtn = overlay.querySelector<HTMLButtonElement>('.overlay-btn');
+  if (overlayBtn) overlayBtn.style.pointerEvents = 'auto';
   overlayBtn?.addEventListener('click', async (e) => {
     e.stopPropagation();
     if (!currentTask?.id) return;
@@ -123,11 +126,18 @@ export function LiveBrowserView(): HTMLDivElement & {
 
   frame.append(backdrop, canvas, img, overlay, cursor);
 
+  // Debounced hover to reduce flicker when moving near edges
+  let hoverTimer: number | null = null;
   frame.addEventListener('mouseenter', () => {
+    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
     if (!manual) overlay.classList.remove('hidden');
   });
   frame.addEventListener('mouseleave', () => {
-    overlay.classList.add('hidden');
+    if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+    hoverTimer = window.setTimeout(() => {
+      overlay.classList.add('hidden');
+      hoverTimer = null;
+    }, 100);
   });
 
   const chromeBar = document.createElement('div');
@@ -364,6 +374,7 @@ export function LiveBrowserView(): HTMLDivElement & {
   }
 
   function setTask(task: Task | null): void {
+    const prevId = currentTask?.id || null;
     currentTask = task;
     // Start/stop passive screenshot refresh when not streaming
     try { if (screenshotInterval) { clearInterval(screenshotInterval); screenshotInterval = null; } } catch {}
@@ -376,6 +387,12 @@ export function LiveBrowserView(): HTMLDivElement & {
     if (manual && socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: 'startScreencast', taskId: task.id }));
     }
+    // If task id hasn't changed, don't restart polling to avoid jitter/flicker
+    if (prevId && task.id === prevId) {
+      return;
+    }
+    // New task: reset last seen still image to ensure first update is applied
+    lastStillB64 = null;
     // Poll live screenshot periodically to keep preview fresh even when AI is thinking
     const poll = async () => {
       if (!currentTask || streamActive) return;
@@ -395,14 +412,15 @@ export function LiveBrowserView(): HTMLDivElement & {
     screenshotInterval = window.setInterval(poll, 2000);
   }
 
+  // Track the last still image to avoid redundant src resets that can cause flashes
+  let lastStillB64: string | null = null;
   function update(base64Png: string): void {
     // Skip auto-updates while user is in manual control to avoid glitches
     if (manual) return;
+    if (lastStillB64 === base64Png) return;
+    lastStillB64 = base64Png;
     img.src = `data:image/png;base64,${base64Png}`;
     if (!streamActive) {
-      const ov = frame.querySelector('.overlay-cta');
-      if (ov && !manual) ov.classList.remove('hidden');
-      img.onload = () => { if (ov) ov.classList.add('hidden'); };
       img.style.display = 'block';
       canvas.style.display = 'none';
       img.decode?.().then(() => {
@@ -435,7 +453,7 @@ export function LiveBrowserView(): HTMLDivElement & {
         canvas.width = w;
         canvas.height = h;
       }
-      ctx.drawImage(image, 0, 0, w, h);
+  ctx!.drawImage(image, 0, 0, w, h);
       lastMeta = { deviceWidth: w, deviceHeight: h };
       if (w > 0 && h > 0) frame.style.setProperty('--live-ar', (w/h).toString());
       const ov = frame.querySelector('.overlay-cta');
@@ -457,6 +475,7 @@ export function LiveBrowserView(): HTMLDivElement & {
 
   async function enterManual(): Promise<void> {
     manual = true;
+    overlay.classList.add('hidden');
     if (currentTask?.id) {
       try { await fetch(`/api/tasks/${currentTask.id}/pause`, { method: 'POST' }); } catch {}
     }
@@ -495,6 +514,10 @@ export function LiveBrowserView(): HTMLDivElement & {
   }
 
   async function exitManual(): Promise<void> {
+    // Notify backend to release manual control back to AI via WebSocket first
+    if (socket && socket.readyState === WebSocket.OPEN && currentTask?.id) {
+      try { socket.send(JSON.stringify({ type: 'releaseControl', taskId: currentTask.id })); } catch {}
+    }
     manual = false;
     if (currentTask?.id) {
       try { await fetch(`/api/tasks/${currentTask.id}/resume`, { method: 'POST' }); } catch {}

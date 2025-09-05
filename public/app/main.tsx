@@ -200,10 +200,8 @@ class App {
     this.taskStatus.update(task);
     this.activityLog.update(task.steps || []);
     this.liveView.setTask(task);
-    const last = (task.screenshots || [])[task.screenshots.length - 1];
-    if (last && !(this.liveView.isStreaming && this.liveView.isStreaming())) {
-      this.liveView.update(last.data);
-    }
+    // Don't force-set the last historical screenshot here; let passive polling or stream update
+    // Doing so can cause flicker back to outdated pages during navigation
     if (this.ws && this.ws.readyState === WebSocket.OPEN && task && task.id) {
       this.ws.send(JSON.stringify({ type: 'subscribe', taskId: task.id }));
     }

@@ -29,6 +29,8 @@ export class BrowserAgent {
   private _unsubscribeTM: () => void;
   consecutiveFailures: Map<string, number>;
   private taskLoopState: Map<string, { lastFingerprint?: string; unchangedCount: number; lastActionKey?: string; repeatCount: number; remediationCount: number }>;
+  // When true for a request, we will attach OpenAI's reasoning parameter; otherwise we omit it
+  // This is model-dependent and defaults to off unless the model is recognized as reasoning-capable
   
   // State machines for better control flow
   private taskStateMachines: Map<string, TaskStateMachine>;
@@ -361,7 +363,9 @@ export class BrowserAgent {
   async requestManualControl(taskId: string): Promise<boolean> {
     const taskSM = this.getOrCreateTaskStateMachine(taskId);
     if ((taskSM.isRunning() || taskSM.isPaused()) && await taskSM.takeManualControl()) {
-      return await this.browserControlSM.requestManualControl();
+      const granted = await this.browserControlSM.requestManualControl();
+      try { console.log(`[Control] Manual control ${granted ? 'granted' : 'denied'} for task ${taskId}`); } catch {}
+      return granted;
     }
     return false;
   }
@@ -369,7 +373,19 @@ export class BrowserAgent {
   async releaseManualControl(taskId: string): Promise<boolean> {
     const taskSM = this.getOrCreateTaskStateMachine(taskId);
     if (taskSM.isInManualControl() && await taskSM.giveControlToAI()) {
-      return await this.browserControlSM.requestAIControl();
+      const granted = await this.browserControlSM.requestAIControl();
+      try { console.log(`[Control] AI control ${granted ? 'granted' : 'not granted'} for task ${taskId}`); } catch {}
+      // If the AI loop isn't currently running for this task (e.g., it ended during manual control), restart it
+      if (granted) {
+        try {
+          if (!this.processingTasks.has(taskId)) {
+            console.log(`[Control] Kicking AI loop for task ${taskId} after control release`);
+            // Fire and forget; internal guard prevents duplicate processing
+            this.processTask(taskId);
+          }
+        } catch {}
+      }
+      return granted;
     }
     return false;
   }
@@ -487,6 +503,8 @@ export class BrowserAgent {
       if (taskSM.isInManualControl()) {
         console.log(`Task ${taskId} is under manual control, waiting...`);
         await this.waitForManualControlRelease(taskId);
+        // Small backoff before continuing to allow control state to settle
+        await this.delay(100);
         continue;
       }
       
@@ -891,12 +909,23 @@ ${context}` },
       model: this.deploymentName, 
       messages: messages as any, 
       tools: tools as any, 
-      tool_choice: 'auto', 
-      temperature: 0.1
+      tool_choice: 'auto'
     };
-    if (this.reasoningEffort) {
-      // Only include reasoning for models that support it; caller opts-in via env
-      payload.reasoning = { effort: this.reasoningEffort };
+    // Only include reasoning when both (a) an effort level is set and (b) the model supports it
+    // You can force-enable via ALLOW_REASONING_PARAM=true env for experimentation
+    const forceReasoning = /^true$/i.test(String(process.env.ALLOW_REASONING_PARAM || ''));
+    const mode = this.getReasoningParamMode(this.deploymentName);
+    if (this.reasoningEffort && (mode !== 'none' || forceReasoning)) {
+      if (mode === 'openai_reasoning_object' || (forceReasoning && mode === 'none')) {
+        payload.reasoning = { effort: this.reasoningEffort };
+        try { console.log(`Including reasoning parameter as object for model "${this.deploymentName}" (effort=${this.reasoningEffort})`); } catch {}
+      } else if (mode === 'azure_reasoning_effort') {
+        (payload as any).reasoning_effort = this.reasoningEffort;
+        try { console.log(`Including reasoning_effort for model "${this.deploymentName}" (effort=${this.reasoningEffort})`); } catch {}
+      }
+    } else if (this.reasoningEffort && mode === 'none' && !forceReasoning) {
+      // Log once to indicate omission
+      try { console.warn(`Reasoning effort set (${this.reasoningEffort}) but model "${this.deploymentName}" does not advertise a supported reasoning parameter. Skipping it.`); } catch {}
     }
     const response = await this.openai.chat.completions.create(
       payload,
@@ -904,6 +933,20 @@ ${context}` },
     );
     this.abortControllers.delete(task.id);
     return response as unknown;
+  }
+
+  // Determine how to send "reasoning" for a given deployment/model name
+  // - 'openai_reasoning_object': payload.reasoning = { effort: 'low'|'medium'|'high'|'minimal' }
+  // - 'azure_reasoning_effort': payload.reasoning_effort = 'low'|'medium'|'high'|'minimal'
+  // - 'none': do not send a reasoning parameter
+  private getReasoningParamMode(model: string): 'none' | 'openai_reasoning_object' | 'azure_reasoning_effort' {
+    const m = (model || '').toLowerCase();
+    // Azure GPT-5 family expects top-level reasoning_effort
+    if (/^gpt-5/.test(m)) return 'azure_reasoning_effort';
+    // Known OpenAI-style reasoning object support: o3 family or any model containing 'reason'
+    if (/^o3/.test(m)) return 'openai_reasoning_object';
+    if (m.includes('reason')) return 'openai_reasoning_object'; // e.g., gpt-4o-reasoning
+    return 'none';
   }
 
   async getStructuredPageContext(): Promise<unknown> {

@@ -4,12 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun run server/index.js",
+  "dev": "bun run server/index.js",
     "smoke:role": "bun run server/smoke_role_click.ts",
     "smoke:disguised": "bun run server/smoke_disguised_button.ts",
     "smoke:image": "bun run server/smoke_image_button.ts",
+  "smoke:ai": "bun run server/smoke_ai.ts",
     "build": "rm -rf dist && mkdir -p dist/public && cp -r public/* dist/public/ && bun build public/app/main.js --outdir dist/public/app --target browser",
-    "start": "NODE_ENV=production bun run server/index.js",
+  "start": "NODE_ENV=production bun run server/index.js",
     "setup": "bun run setup.js",
     "test": "bun run test.js"
   },
