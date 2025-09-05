@@ -1,4 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
+import fs from 'fs';
+import path from 'path';
 
 export type TaskStatus = 'created' | 'running' | 'paused' | 'stopped' | 'completed' | 'failed' | 'deleted';
 
@@ -40,11 +42,16 @@ export class TaskManager {
   private tasks: Map<string, Task>;
   private subscribers: Set<(taskId: string, task: Task) => void>;
   private sessionTasks: Map<string, Set<string>>;
+  private persistFile: string;
+  private saveTimer: NodeJS.Timeout | null;
 
   constructor() {
     this.tasks = new Map();
     this.subscribers = new Set();
     this.sessionTasks = new Map();
+    this.persistFile = path.join(process.cwd(), 'server_data', 'tasks.json');
+    this.saveTimer = null;
+    this.loadFromDisk();
   }
 
   createTask(description: string, sessionId: string | null = null): string {
@@ -70,6 +77,7 @@ export class TaskManager {
       this.sessionTasks.get(task.sessionId)!.add(taskId);
     }
     this.notifySubscribers(taskId, task);
+    this.scheduleSave();
     return taskId;
   }
 
@@ -83,6 +91,7 @@ export class TaskManager {
     const updatedTask: Task = { ...task, ...updates, updatedAt: new Date().toISOString() } as Task;
     this.tasks.set(taskId, updatedTask);
     this.notifySubscribers(taskId, updatedTask);
+    this.scheduleSave();
     return true;
   }
 
@@ -95,6 +104,7 @@ export class TaskManager {
     task.updatedAt = new Date().toISOString();
     this.tasks.set(taskId, task);
     this.notifySubscribers(taskId, task);
+    this.scheduleSave();
     return true;
   }
 
@@ -107,6 +117,7 @@ export class TaskManager {
     task.updatedAt = new Date().toISOString();
     this.tasks.set(taskId, task);
     this.notifySubscribers(taskId, task);
+    this.scheduleSave();
     return true;
   }
 
@@ -119,6 +130,7 @@ export class TaskManager {
       task.updatedAt = new Date().toISOString();
       this.tasks.set(taskId, task);
       this.notifySubscribers(taskId, task);
+      this.scheduleSave();
     }
     return true;
   }
@@ -132,6 +144,7 @@ export class TaskManager {
       task.updatedAt = new Date().toISOString();
       this.tasks.set(taskId, task);
       this.notifySubscribers(taskId, task);
+      this.scheduleSave();
     }
     return true;
   }
@@ -144,6 +157,7 @@ export class TaskManager {
     task.updatedAt = new Date().toISOString();
     this.tasks.set(taskId, task);
     this.notifySubscribers(taskId, task);
+    this.scheduleSave();
     return true;
   }
 
@@ -156,6 +170,7 @@ export class TaskManager {
     task.updatedAt = new Date().toISOString();
     this.tasks.set(taskId, task);
     this.notifySubscribers(taskId, task);
+    this.scheduleSave();
     return true;
   }
 
@@ -168,6 +183,7 @@ export class TaskManager {
     task.updatedAt = new Date().toISOString();
     this.tasks.set(taskId, task);
     this.notifySubscribers(taskId, task);
+    this.scheduleSave();
     return true;
   }
 
@@ -192,6 +208,50 @@ export class TaskManager {
         console.error('Error in task subscriber:', error);
       }
     });
+  }
+
+  private ensureDataDir(): void {
+    const dir = path.dirname(this.persistFile);
+    try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  }
+
+  private scheduleSave(): void {
+    try { if (this.saveTimer) clearTimeout(this.saveTimer); } catch {}
+    this.saveTimer = setTimeout(() => this.saveToDisk(), 300);
+  }
+
+  private saveToDisk(): void {
+    try {
+      this.ensureDataDir();
+      const obj = {
+        tasks: Array.from(this.tasks.values()),
+        sessionTasks: Array.from(this.sessionTasks.entries()).map(([sid, ids]) => [sid, Array.from(ids)]),
+        savedAt: new Date().toISOString(),
+      } as Record<string, unknown>;
+      fs.writeFileSync(this.persistFile, JSON.stringify(obj, null, 2), 'utf-8');
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('Failed to persist tasks:', (e as Error)?.message || e);
+    }
+  }
+
+  private loadFromDisk(): void {
+    try {
+      if (!fs.existsSync(this.persistFile)) return;
+      const raw = fs.readFileSync(this.persistFile, 'utf-8');
+      const data = JSON.parse(raw) as { tasks?: Task[]; sessionTasks?: Array<[string, string[]]> };
+      this.tasks = new Map();
+      (data.tasks || []).forEach((t) => {
+        if (t && !t.deleted) this.tasks.set(t.id, t);
+      });
+      this.sessionTasks = new Map();
+      (data.sessionTasks || []).forEach(([sid, ids]) => {
+        this.sessionTasks.set(sid, new Set(ids));
+      });
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('Failed to load tasks from disk:', (e as Error)?.message || e);
+    }
   }
 
   cleanup(): void {
@@ -223,7 +283,7 @@ export class TaskManager {
     }
     this.tasks.set(taskId, task);
     this.notifySubscribers(taskId, task);
+    this.scheduleSave();
     return true;
   }
 }
-

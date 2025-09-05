@@ -41,6 +41,8 @@ export class TaskStateMachine extends StateMachine<TaskState> {
         { from: TaskState.INITIALIZING, to: TaskState.FAILED, event: 'INIT_FAILED' },
         { from: TaskState.RUNNING, to: TaskState.PAUSED, event: 'PAUSE' },
         { from: TaskState.RUNNING, to: TaskState.MANUAL_CONTROL, event: 'MANUAL_TAKEOVER' },
+        // Allow manual control request while paused as well
+        { from: TaskState.PAUSED, to: TaskState.MANUAL_CONTROL, event: 'MANUAL_TAKEOVER' },
         { from: TaskState.RUNNING, to: TaskState.COMPLETED, event: 'COMPLETE' },
         { from: TaskState.RUNNING, to: TaskState.FAILED, event: 'FAIL' },
         { from: TaskState.PAUSED, to: TaskState.RUNNING, event: 'RESUME' },

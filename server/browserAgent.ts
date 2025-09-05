@@ -32,6 +32,7 @@ export class BrowserAgent {
   // State machines for better control flow
   private taskStateMachines: Map<string, TaskStateMachine>;
   private browserControlSM: BrowserControlStateMachine;
+  private heartbeats: Map<string, NodeJS.Timeout>;
 
   constructor(taskManager: TaskManager) {
     this.taskManager = taskManager;
@@ -46,6 +47,7 @@ export class BrowserAgent {
     // Initialize state machines
     this.taskStateMachines = new Map();
     this.browserControlSM = new BrowserControlStateMachine();
+    this.heartbeats = new Map();
 
     this.openai = new OpenAI({
       baseURL: (process.env.AZURE_OPENAI_ENDPOINT || '') + 'openai/v1/',
@@ -213,7 +215,7 @@ export class BrowserAgent {
 
   async requestManualControl(taskId: string): Promise<boolean> {
     const taskSM = this.getOrCreateTaskStateMachine(taskId);
-    if (taskSM.isRunning() && await taskSM.takeManualControl()) {
+    if ((taskSM.isRunning() || taskSM.isPaused()) && await taskSM.takeManualControl()) {
       return await this.browserControlSM.requestManualControl();
     }
     return false;
@@ -257,6 +259,16 @@ export class BrowserAgent {
       // Use state machine for proper state transitions
       await taskSM.start();
       
+      // Start a lightweight heartbeat so UI sees progress even during long AI calls
+      try {
+        if (!this.heartbeats.has(taskId)) {
+          const hb = setInterval(() => {
+            try { this.taskManager.updateTask(taskId, {} as Partial<Task>); } catch {}
+          }, 3000);
+          this.heartbeats.set(taskId, hb);
+        }
+      } catch {}
+
       // Initialize browser and take initial screenshot
       await this.initializeBrowser();
       if (this.page!.url() === 'about:blank') { 
@@ -277,6 +289,8 @@ export class BrowserAgent {
       this.taskManager.failTask(taskId, error);
     } finally { 
       this.processingTasks.delete(taskId); 
+      const hb = this.heartbeats.get(taskId);
+      if (hb) { try { clearInterval(hb); } catch {} this.heartbeats.delete(taskId); }
     }
   }
 
@@ -686,6 +700,14 @@ ${context}` },
         case 'reload': await this._withTimeout(() => this.page!.reload({ timeout: this.navTimeoutMs, waitUntil: 'domcontentloaded' }), this.navTimeoutMs + 1000, 'reload'); break;
         case 'go_back': await this._withTimeout(() => this.page!.goBack({ timeout: this.navTimeoutMs, waitUntil: 'domcontentloaded' }), this.navTimeoutMs + 1000, 'go_back'); break;
         case 'go_forward': await this._withTimeout(() => this.page!.goForward({ timeout: this.navTimeoutMs, waitUntil: 'domcontentloaded' }), this.navTimeoutMs + 1000, 'go_forward'); break;
+        case 'new_tab': {
+          const oldPage = this.page;
+          const newPage = await this.browser!.newPage();
+          await newPage.setViewportSize({ width: this.displayWidth, height: this.displayHeight }).catch(() => {});
+          this.page = newPage;
+          try { await oldPage?.close(); } catch {}
+          break;
+        }
         case 'wait': await this.delay(Math.min(Number(A.wait_ms) || 1000, this.actionTimeoutMs)); break;
   case 'click_element': { const { locator } = await this.resolveLocator(A.locator as Record<string, unknown>); const t = Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2); const btnStr = String(A.button || 'left'); const btn = (['left','middle','right'].includes(btnStr) ? (btnStr as 'left'|'middle'|'right') : 'left'); await withRetry(() => this._reliableClick(locator, { timeout: t, button: btn })); break; }
         case 'click_by_text': { if (typeof A.text !== 'string') throw new Error('click_by_text requires text'); const t = Math.min((A.timeout_ms as number | undefined) || this.actionTimeoutMs, this.actionTimeoutMs * 2); await withRetry(async () => { const locs: Locator[] = []; const txt = A.text as string; const exact = !!A.exact; // Role buttons with name

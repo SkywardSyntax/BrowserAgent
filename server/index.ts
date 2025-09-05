@@ -241,9 +241,19 @@ app.post('/api/tasks/:taskId/stop', (req, res) => {
   }
 });
 
-wss.on('connection', (ws: WebSocket & { taskId?: string; _stopStream?: () => void; _lastFrameTs?: number }) => {
+wss.on('connection', (ws: WebSocket & { taskId?: string; _stopStream?: () => void; _lastFrameTs?: number; _hb?: NodeJS.Timeout; _alive?: boolean }) => {
   // eslint-disable-next-line no-console
   console.log('WebSocket client connected');
+  ws._alive = true;
+  ws.on('pong', () => { ws._alive = true; });
+
+  // Lightweight heartbeat to keep connection warm and signal liveness to client
+  try { if (ws._hb) clearInterval(ws._hb); } catch {}
+  ws._hb = setInterval(() => {
+    try { if (ws.readyState === ws.OPEN) { ws.ping?.(); ws.send(JSON.stringify({ type: 'heartbeat', ts: Date.now() })); } } catch {}
+    if (ws._alive === false) { try { ws.terminate(); } catch {} }
+    ws._alive = false;
+  }, 5000);
   const unsubscribe = taskManager.subscribe((taskId, task) => {
     try {
       if (ws.taskId && ws.taskId !== taskId) return;
@@ -262,34 +272,32 @@ wss.on('connection', (ws: WebSocket & { taskId?: string; _stopStream?: () => voi
           if (t) ws.taskId = t;
           break;
         }
-        case 'userTakeover': {
+        case 'userTakeover': (async () => {
           const r = data as Record<string, unknown>;
           const t = typeof r.taskId === 'string' ? (r.taskId as string) : undefined;
-          if (t) {
-            // Use state machine for proper manual control transition
+          if (!t) return;
+          try {
+            // Use state machine for proper manual control transition (allow from running or paused)
             const success = await browserAgent.requestManualControl(t);
-            if (success) {
-              ws.send(JSON.stringify({ type: 'takeoverGranted', taskId: t }));
-            } else {
-              ws.send(JSON.stringify({ type: 'takeoverDenied', taskId: t, reason: 'Unable to transition to manual control' }));
-            }
+            if (success) ws.send(JSON.stringify({ type: 'takeoverGranted', taskId: t }));
+            else ws.send(JSON.stringify({ type: 'takeoverDenied', taskId: t, reason: 'Unable to transition to manual control' }));
+          } catch (e) {
+            try { ws.send(JSON.stringify({ type: 'takeoverDenied', taskId: t, reason: String((e as Error)?.message || e) })); } catch {}
           }
-          break;
-        }
-        case 'releaseControl': {
+        })(); break;
+        case 'releaseControl': (async () => {
           const r = data as Record<string, unknown>;
           const t = typeof r.taskId === 'string' ? (r.taskId as string) : undefined;
-          if (t) {
+          if (!t) return;
+          try {
             // Use state machine to release manual control back to AI
             const success = await browserAgent.releaseManualControl(t);
-            if (success) {
-              ws.send(JSON.stringify({ type: 'controlReleased', taskId: t }));
-            } else {
-              ws.send(JSON.stringify({ type: 'controlReleaseFailed', taskId: t, reason: 'Unable to release manual control' }));
-            }
+            if (success) ws.send(JSON.stringify({ type: 'controlReleased', taskId: t }));
+            else ws.send(JSON.stringify({ type: 'controlReleaseFailed', taskId: t, reason: 'Unable to release manual control' }));
+          } catch (e) {
+            try { ws.send(JSON.stringify({ type: 'controlReleaseFailed', taskId: t, reason: String((e as Error)?.message || e) })); } catch {}
           }
-          break;
-        }
+        })(); break;
         case 'startScreencast': (async () => {
           try {
             if (ws._stopStream) { ws._stopStream(); ws._stopStream = undefined; }
@@ -337,6 +345,7 @@ wss.on('connection', (ws: WebSocket & { taskId?: string; _stopStream?: () => voi
     // eslint-disable-next-line no-console
     console.log('WebSocket client disconnected');
     unsubscribe();
+    try { if (ws._hb) clearInterval(ws._hb); } catch {}
     if (ws._stopStream) {
       try { ws._stopStream(); } catch {}
       ws._stopStream = undefined;
@@ -351,6 +360,13 @@ server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   // eslint-disable-next-line no-console
   console.log(`WebSocket server running on ws://localhost:${PORT}`);
+  // Resume any previously running tasks from persisted state
+  try {
+    const tasks = taskManager.getAllTasks?.() || [];
+    tasks.filter((t) => t.status === 'running').forEach((t) => {
+      try { browserAgent.processTask(t.id); } catch {}
+    });
+  } catch {}
 });
 
 process.on('SIGTERM', async () => {
