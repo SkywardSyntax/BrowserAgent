@@ -104,6 +104,24 @@ app.get('/api/page-state', async (_req, res) => {
   try { res.json(await browserAgent.getPageState()); } catch { res.status(500).json({ error: 'Failed to get page state' }); }
 });
 
+app.get('/api/screenshot', async (_req, res) => {
+  try {
+    await browserAgent.initializeBrowser();
+    const b64 = await browserAgent.takeScreenshot();
+    const img = Buffer.from(b64, 'base64');
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Content-Length': img.length,
+      'Cache-Control': 'no-store',
+    });
+    res.end(img);
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error('Error generating screenshot:', error);
+    res.status(500).send('Failed to get screenshot');
+  }
+});
+
 app.get('/api/tasks/:taskId/screenshot', (req, res) => {
   try {
     const { taskId } = req.params as { taskId: string };

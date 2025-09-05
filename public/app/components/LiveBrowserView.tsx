@@ -82,6 +82,10 @@ export function LiveBrowserView(): HTMLDivElement & {
 
   const frame = document.createElement('div');
   frame.className = 'frame';
+  // Allow frame to receive focus for keyboard events
+  frame.tabIndex = 0;
+  // Make frame focusable to capture keyboard after manual URL entry
+  frame.tabIndex = 0;
   frame.style.setProperty('--live-ar', (1280/800).toString());
   const backdrop = document.createElement('div');
   backdrop.className = 'backdrop';
@@ -142,11 +146,12 @@ export function LiveBrowserView(): HTMLDivElement & {
           <button class="nav-reload px-2 py-1 text-white/70 hover:text-white">⟳</button>
         </div>
         <input class="addr flex-1 min-w-[200px] text-[12px] px-3 py-1 rounded-full bg-white/10 text-white placeholder-white/50 outline-none border border-white/15" placeholder="Enter URL and press Enter" />
-        <div class="tab text-[12px] text-white/80 px-2 py-1 rounded bg-white/10 max-w-[40%] truncate"><span class="tab-title">New Tab</span></div>
+  <div class="tab text-[12px] text-white/80 px-2 py-1 rounded bg-white/10 max-w-[40%] truncate" title="Open new tab"><span class="tab-title">New Tab</span></div>
       </div>
     </div>`;
   const addrInput = chromeBar.querySelector<HTMLInputElement>('.addr');
   const tabTitle = chromeBar.querySelector<HTMLSpanElement>('.tab-title');
+  const tabEl = chromeBar.querySelector<HTMLDivElement>('.tab');
   const backBtn = chromeBar.querySelector<HTMLButtonElement>('.nav-back');
   const fwdBtn = chromeBar.querySelector<HTMLButtonElement>('.nav-fwd');
   const reloadBtn = chromeBar.querySelector<HTMLButtonElement>('.nav-reload');
@@ -194,6 +199,13 @@ export function LiveBrowserView(): HTMLDivElement & {
   reloadBtn?.addEventListener('click', async () => {
     if (!currentTask) return;
     await sendAction({ action: 'reload', reason: 'User pressed reload' });
+    frame.focus();
+  });
+  // Open new tab when clicking the tab control
+  tabEl?.addEventListener('click', async () => {
+    if (!currentTask) return;
+    await sendAction({ action: 'new_tab', reason: 'User opened new tab' });
+    frame.focus();
   });
   addrInput?.addEventListener('keydown', async (e: KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -210,6 +222,7 @@ export function LiveBrowserView(): HTMLDivElement & {
   addrInput?.addEventListener('focus', () => { isEditingAddr = true; });
   addrInput?.addEventListener('input', () => { isEditingAddr = true; });
   addrInput?.addEventListener('blur', () => { isEditingAddr = false; });
+  addrInput?.addEventListener('blur', () => { isEditingAddr = false; frame.focus(); });
 
   frame.addEventListener('click', async (ev: MouseEvent) => {
     if (!manual || !currentTask) return;
@@ -363,6 +376,8 @@ export function LiveBrowserView(): HTMLDivElement & {
   }
 
   function update(base64Png: string): void {
+    // Skip auto-updates while user is in manual control to avoid glitches
+    if (manual) return;
     img.src = `data:image/png;base64,${base64Png}`;
     if (!streamActive) {
       const ov = frame.querySelector('.overlay-cta');

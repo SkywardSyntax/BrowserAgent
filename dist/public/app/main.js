@@ -1,27 +1,26 @@
-// public/app/state/session.js
+// public/app/main.js
 class Session {
+  id;
   constructor() {
     this.id = null;
   }
   async ensure() {
-    const stored = localStorage.getItem("sessionId");
+    const stored = globalThis.localStorage?.getItem("sessionId");
     if (stored) {
       this.id = stored;
       return this.id;
     }
-    const rnd = (n) => crypto.getRandomValues(new Uint8Array(n));
-    const toHex = (buf) => Array.from(buf).map((b2) => b2.toString(16).padStart(2, "0")).join("");
-    const b = rnd(16);
+    const b = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(b);
     b[6] = b[6] & 15 | 64;
     b[8] = b[8] & 63 | 128;
+    const toHex = (buf) => Array.from(buf).map((x) => x.toString(16).padStart(2, "0")).join("");
     const hex = toHex(b);
     this.id = `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}`;
-    localStorage.setItem("sessionId", this.id);
+    globalThis.localStorage?.setItem("sessionId", this.id);
     return this.id;
   }
 }
-
-// public/app/components/ThemeToggle.js
 function ThemeToggle() {
   const el = document.createElement("button");
   el.className = "theme-toggle";
@@ -36,8 +35,6 @@ function ThemeToggle() {
   el.addEventListener("click", () => set(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark"));
   return el;
 }
-
-// public/app/components/TaskInput.js
 function TaskInput({ onSubmit }) {
   const wrap = document.createElement("div");
   wrap.className = "task-input";
@@ -71,8 +68,6 @@ function TaskInput({ onSubmit }) {
   }
   return wrap;
 }
-
-// public/app/components/LiveBrowserView.js
 function LiveBrowserView() {
   const wrap = document.createElement("div");
   wrap.className = "live";
@@ -96,7 +91,7 @@ function LiveBrowserView() {
     b.textContent = label;
     if (title)
       b.title = title;
-    b.addEventListener("click", handler);
+    b.addEventListener("click", () => void handler());
     return b;
   };
   let currentTask = null;
@@ -105,66 +100,6 @@ function LiveBrowserView() {
   let expanded = false;
   let isEditingAddr = false;
   let pendingNavUrl = null;
-  const control = btn("Take Control", "Temporarily take manual control of the browser", async () => {
-    manual = !manual;
-    control.textContent = manual ? "Return to AI" : "Take Control";
-    if (currentTask && currentTask.id) {
-      try {
-        await fetch(`/api/tasks/${currentTask.id}/${manual ? "pause" : "resume"}`, { method: "POST" });
-      } catch {}
-    }
-    if (manual && socket && socket.readyState === WebSocket.OPEN && currentTask?.id) {
-      try {
-        socket.send(JSON.stringify({ type: "userTakeover", taskId: currentTask.id }));
-      } catch {}
-    }
-    frame.classList.toggle("manual", manual);
-    chromeBar.classList.toggle("invisible", !manual);
-    chromeBar.classList.toggle("pointer-events-none", !manual);
-    cursor.style.display = manual ? "block" : "none";
-    if (manual) {
-      if (!streamRequested && socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "startScreencast", taskId: currentTask?.id }));
-        streamRequested = true;
-      }
-    } else {
-      if (streamRequested && socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "stopScreencast" }));
-      }
-      streamActive = false;
-      streamRequested = false;
-      toggleExpanded(false);
-    }
-    if (manual) {
-      const fetchState = async () => {
-        try {
-          const res = await fetch("/api/page-state");
-          if (!res.ok)
-            return;
-          const data = await res.json();
-          const nextUrl = data.url || "";
-          if (!isEditingAddr) {
-            if (pendingNavUrl) {
-              if (urlsMatch(nextUrl, pendingNavUrl)) {
-                addrInput.value = nextUrl;
-                pendingNavUrl = null;
-              }
-            } else {
-              addrInput.value = nextUrl;
-            }
-          }
-          tabTitle.textContent = data.title || "New Tab";
-        } catch {}
-      };
-      await fetchState();
-      chromeInterval = setInterval(fetchState, 1500);
-    } else {
-      if (chromeInterval) {
-        clearInterval(chromeInterval);
-        chromeInterval = null;
-      }
-    }
-  });
   const refresh = btn("Refresh", "Fetch latest screenshot", async () => {
     if (!currentTask)
       return;
@@ -202,7 +137,7 @@ function LiveBrowserView() {
       ]);
     } catch {}
   });
-  toolbar.append(badge, hint, spacer, last, refresh, openNew, download, copy, control);
+  toolbar.append(badge, hint, spacer, last, refresh, openNew, download, copy);
   const frame = document.createElement("div");
   frame.className = "frame";
   frame.style.setProperty("--live-ar", (1280 / 800).toString());
@@ -215,6 +150,8 @@ function LiveBrowserView() {
   canvas.style.height = "auto";
   canvas.style.display = "none";
   const ctx = canvas.getContext("2d");
+  if (!ctx)
+    throw new Error("Canvas 2D context unavailable");
   const overlay = document.createElement("div");
   overlay.className = "overlay-cta absolute inset-0 z-10 grid place-items-center hidden";
   overlay.innerHTML = `
@@ -231,7 +168,7 @@ function LiveBrowserView() {
     if (!currentTask?.id)
       return;
     if (!manual)
-      await control.click();
+      await enterManual();
     toggleExpanded(true);
   });
   const cursor = document.createElement("div");
@@ -300,7 +237,7 @@ function LiveBrowserView() {
   const exitBtn = giveBack.querySelector(".overlay-exit");
   exitBtn?.addEventListener("click", async () => {
     if (manual)
-      await control.click();
+      await exitManual();
     toggleExpanded(false);
   });
   backBtn?.addEventListener("click", async () => {
@@ -451,7 +388,8 @@ function LiveBrowserView() {
   window.addEventListener("keydown", async (ev) => {
     if (!manual || !currentTask)
       return;
-    const tag = (ev.target && ev.target.tagName || "").toLowerCase();
+    const target = ev.target;
+    const tag = (target && target.tagName || "").toLowerCase();
     if (tag === "input" || tag === "textarea")
       return;
     const key = ev.key;
@@ -479,7 +417,7 @@ function LiveBrowserView() {
   function blobToBase64(blob) {
     return new Promise((resolve) => {
       const reader = new FileReader;
-      reader.onloadend = () => resolve(reader.result.split(",")[1]);
+      reader.onloadend = () => resolve(String(reader.result).split(",")[1] || "");
       reader.readAsDataURL(blob);
     });
   }
@@ -491,7 +429,6 @@ function LiveBrowserView() {
     }
     refresh.disabled = !task || !task.id;
     openNew.disabled = !task || !task.id;
-    control.disabled = !task || !task.id;
     if (manual && socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify({ type: "startScreencast", taskId: task.id }));
     }
@@ -560,15 +497,76 @@ function LiveBrowserView() {
     frame.appendChild(dot);
     setTimeout(() => dot.remove(), 600);
   }
-  return Object.assign(wrap, {
-    update,
-    setTask,
-    setSocket,
-    drawFrame,
-    isStreaming: () => streamActive,
-    isManual: () => manual,
-    isExpanded: () => expanded
-  });
+  async function enterManual() {
+    manual = true;
+    if (currentTask?.id) {
+      try {
+        await fetch(`/api/tasks/${currentTask.id}/pause`, { method: "POST" });
+      } catch {}
+    }
+    if (socket && socket.readyState === WebSocket.OPEN && currentTask?.id) {
+      try {
+        socket.send(JSON.stringify({ type: "userTakeover", taskId: currentTask.id }));
+      } catch {}
+    }
+    frame.classList.toggle("manual", true);
+    chromeBar.classList.toggle("invisible", false);
+    chromeBar.classList.toggle("pointer-events-none", false);
+    cursor.style.display = "block";
+    if (!streamRequested && socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "startScreencast", taskId: currentTask?.id }));
+      streamRequested = true;
+    }
+    const fetchState = async () => {
+      try {
+        const res = await fetch("/api/page-state");
+        if (!res.ok)
+          return;
+        const data = await res.json();
+        const nextUrl = data.url || "";
+        if (!isEditingAddr) {
+          if (pendingNavUrl) {
+            if (urlsMatch(nextUrl, pendingNavUrl)) {
+              if (addrInput)
+                addrInput.value = nextUrl;
+              pendingNavUrl = null;
+            }
+          } else {
+            if (addrInput)
+              addrInput.value = nextUrl;
+          }
+        }
+        if (tabTitle)
+          tabTitle.textContent = data.title || "New Tab";
+      } catch {}
+    };
+    await fetchState();
+    chromeInterval = window.setInterval(fetchState, 1500);
+  }
+  async function exitManual() {
+    manual = false;
+    if (currentTask?.id) {
+      try {
+        await fetch(`/api/tasks/${currentTask.id}/resume`, { method: "POST" });
+      } catch {}
+    }
+    frame.classList.toggle("manual", false);
+    chromeBar.classList.toggle("invisible", true);
+    chromeBar.classList.toggle("pointer-events-none", true);
+    cursor.style.display = "none";
+    if (streamRequested && socket && socket.readyState === WebSocket.OPEN) {
+      try {
+        socket.send(JSON.stringify({ type: "stopScreencast" }));
+      } catch {}
+    }
+    streamActive = false;
+    streamRequested = false;
+    toggleExpanded(false);
+    if (chromeInterval) {
+      clearInterval(chromeInterval);
+      chromeInterval = null;
+    }
+  }
   function urlsMatch(a, b) {
     const norm = (u) => {
       if (!u)
@@ -591,13 +589,17 @@ function LiveBrowserView() {
   async function sendAction(action) {
     try {
       if (manual && expanded && socket && socket.readyState === WebSocket.OPEN) {
-        const congested = socket.bufferedAmount && socket.bufferedAmount > 1e6;
-        const isHighFreq = action && (action.action === "wheel" || action.action === "mouse_move");
+        const congested = typeof socket.bufferedAmount === "number" && socket.bufferedAmount > 1e6;
+        const act = action;
+        const isHighFreq = act && (act.action === "wheel" || act.action === "mouse_move");
         if (congested && isHighFreq)
           return;
-        socket.send(JSON.stringify({ type: "input", taskId: currentTask.id, action }));
+        if (currentTask)
+          socket.send(JSON.stringify({ type: "input", taskId: currentTask.id, action }));
         return;
       }
+      if (!currentTask)
+        return;
       const res = await fetch(`/api/tasks/${currentTask.id}/action`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action) });
       if (!res.ok)
         return;
@@ -612,9 +614,16 @@ function LiveBrowserView() {
     else
       giveBack.classList.add("hidden");
   }
+  return Object.assign(wrap, {
+    update,
+    setTask,
+    setSocket,
+    drawFrame,
+    isStreaming: () => streamActive,
+    isManual: () => manual,
+    isExpanded: () => expanded
+  });
 }
-
-// public/app/components/ModelInfo.js
 function ModelInfo() {
   const box = document.createElement("div");
   box.style.marginTop = "12px";
@@ -648,8 +657,6 @@ ${extra.textContent}` : ""));
   }
   return Object.assign(box, { update });
 }
-
-// public/app/components/TaskStatus.js
 function TaskStatus({ onPause, onResume, onStop }) {
   const wrap = document.createElement("div");
   const header = document.createElement("div");
@@ -677,8 +684,6 @@ function TaskStatus({ onPause, onResume, onStop }) {
   const pause = btn("Pause", () => onPause && onPause());
   const resume = btn("Resume", () => onResume && onResume());
   const stop = btn("Stop", () => onStop && onStop(), "danger");
-  const spacer = document.createElement("div");
-  spacer.style.flex = "1";
   controls.append(pause, resume, stop);
   wrap.append(header, desc, meta, details, controls);
   function btn(text, handler, variant = "") {
@@ -722,15 +727,13 @@ function TaskStatus({ onPause, onResume, onStop }) {
   update(null);
   return Object.assign(wrap, { update });
 }
-
-// public/app/components/Dropdown.js
 function Dropdown({ value, options = [], onChange, label = null, small = false }) {
   const wrap = document.createElement("div");
   wrap.className = `dropdown${small ? " small" : ""}`;
   const button = document.createElement("button");
   button.className = "btn";
   button.type = "button";
-  button.textContent = label || displayFor(value, options);
+  button.textContent = label ?? displayFor(value, options);
   const menu = document.createElement("div");
   menu.className = "dropdown-menu";
   let open = false;
@@ -750,7 +753,7 @@ function Dropdown({ value, options = [], onChange, label = null, small = false }
         item.classList.add("active");
       item.addEventListener("click", () => {
         current = o.value;
-        button.textContent = label || displayFor(current, options);
+        button.textContent = label ?? displayFor(current, options);
         close();
         onChange && onChange(current);
       });
@@ -784,7 +787,7 @@ function Dropdown({ value, options = [], onChange, label = null, small = false }
     },
     set value(v) {
       current = v;
-      button.textContent = label || displayFor(current, options);
+      button.textContent = label ?? displayFor(current, options);
     },
     setOptions(opts) {
       options = opts;
@@ -794,8 +797,6 @@ function Dropdown({ value, options = [], onChange, label = null, small = false }
     close
   });
 }
-
-// public/app/components/ActivityLog.js
 function ActivityLog() {
   const wrap = document.createElement("div");
   const controls = document.createElement("div");
@@ -856,8 +857,6 @@ function ActivityLog() {
   wrap.append(controls, box);
   return Object.assign(wrap, { update });
 }
-
-// public/app/components/TaskSidebar.js
 function TaskSidebar({ onSelect, onRename, onDelete }) {
   const wrap = document.createElement("div");
   wrap.className = "sidebar";
@@ -870,7 +869,7 @@ function TaskSidebar({ onSelect, onRename, onDelete }) {
   let currentId = null;
   function render() {
     list.innerHTML = "";
-    tasks.slice().sort((a, b) => new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt)).forEach((t) => {
+    tasks.slice().sort((a, b) => new Date(a.updatedAt || a.createdAt || "").getTime() < new Date(b.updatedAt || b.createdAt || "").getTime() ? 1 : -1).forEach((t) => {
       const item = document.createElement("div");
       item.className = "sidebar-item";
       if (t.id === currentId)
@@ -880,7 +879,8 @@ function TaskSidebar({ onSelect, onRename, onDelete }) {
       title.textContent = t.description || "(untitled)";
       const meta = document.createElement("div");
       meta.className = "meta";
-      meta.textContent = `${t.status || "created"} • ${new Date(t.updatedAt || t.createdAt).toLocaleTimeString()}`;
+      const when = new Date(t.updatedAt || t.createdAt || Date.now()).toLocaleTimeString();
+      meta.textContent = `${t.status || "created"} • ${when}`;
       const actions = document.createElement("div");
       actions.className = "actions";
       const renameBtn = document.createElement("button");
@@ -888,8 +888,8 @@ function TaskSidebar({ onSelect, onRename, onDelete }) {
       renameBtn.textContent = "Rename";
       renameBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        const name = prompt("Rename task", t.description || "");
-        if (name != null)
+        const name = prompt("Rename task", t.description || "") ?? undefined;
+        if (name !== undefined)
           onRename && onRename(t, name);
       });
       const delBtn = document.createElement("button");
@@ -914,17 +914,15 @@ function TaskSidebar({ onSelect, onRename, onDelete }) {
   wrap.append(header, list);
   return Object.assign(wrap, { update });
 }
-
-// public/app/main.js
 var h = (tag, props = {}, ...children) => {
   const el = document.createElement(tag);
   Object.entries(props || {}).forEach(([k, v]) => {
     if (k === "class")
-      el.className = v;
+      el.className = String(v);
     else if (k.startsWith("on") && typeof v === "function")
       el.addEventListener(k.slice(2).toLowerCase(), v);
     else if (v !== undefined && v !== null)
-      el.setAttribute(k, v);
+      el.setAttribute(k, String(v));
   });
   children.flat().forEach((c) => {
     if (c == null)
@@ -938,14 +936,21 @@ var h = (tag, props = {}, ...children) => {
 };
 
 class App {
+  root;
+  session;
+  ws;
+  state;
+  taskInput;
+  liveView;
+  modelInfo;
+  taskStatus;
+  activityLog;
+  sidebar;
   constructor(root) {
     this.root = root;
     this.session = new Session;
     this.ws = null;
-    this.state = {
-      info: null,
-      currentTask: null
-    };
+    this.state = { info: null, currentTask: null };
     this.init();
   }
   async init() {
@@ -957,9 +962,7 @@ class App {
   }
   renderShell() {
     const topbar = h("div", { class: "topbar" }, h("div", { class: "brand" }, h("div", { class: "brand-logo" }), "BrowserAgent"), ThemeToggle());
-    this.taskInput = TaskInput({
-      onSubmit: (text) => this.createTask(text)
-    });
+    this.taskInput = TaskInput({ onSubmit: (text) => this.createTask(text) });
     this.liveView = LiveBrowserView();
     this.modelInfo = ModelInfo();
     const left = h("div", { class: "panel" }, h("div", { class: "hero" }, h("div", { class: "muted" }, "Tell the agent what to do"), this.taskInput, this.modelInfo), h("div", { class: "divider" }), this.liveView);
@@ -996,21 +999,26 @@ class App {
       const res = await fetch("/api/info");
       if (res.ok) {
         this.state.info = await res.json();
-        if (this.modelInfo && this.modelInfo.update)
-          this.modelInfo.update(this.state.info);
+        this.modelInfo.update(this.state.info);
       }
     } catch {}
   }
   async hydrateFromSession() {
     try {
       const res = await fetch(`/api/sessions/${this.session.id}/tasks`);
-      if (!res.ok)
-        return;
-      const { tasks } = await res.json();
-      if (tasks && tasks.length) {
-        const latest = tasks.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt))[0];
-        this.setCurrentTask(latest);
+      if (res.ok) {
+        const { tasks } = await res.json();
+        if (tasks && tasks.length) {
+          const latest = tasks.slice().sort((a, b) => new Date(b.updatedAt || "").getTime() - new Date(a.updatedAt || "").getTime())[0];
+          this.setCurrentTask(latest);
+          this.sidebar.update(tasks, latest.id);
+          this.persistSidebarTasks(tasks);
+          return;
+        }
       }
+      const cached = this.loadSidebarTasks();
+      if (cached.length)
+        this.sidebar.update(cached, this.state.currentTask?.id || null);
     } catch {}
   }
   connectWS() {
@@ -1020,22 +1028,20 @@ class App {
       this.ws = new WebSocket(url);
       this.ws.addEventListener("open", () => {
         if (this.state.currentTask) {
-          this.ws.send(JSON.stringify({ type: "subscribe", taskId: this.state.currentTask.id }));
+          this.ws?.send(JSON.stringify({ type: "subscribe", taskId: this.state.currentTask.id }));
         }
-        if (this.liveView && this.liveView.setSocket)
-          this.liveView.setSocket(this.ws);
+        this.liveView.setSocket(this.ws);
       });
       this.ws.addEventListener("message", (ev) => {
         try {
           const msg = JSON.parse(ev.data);
-          if (msg.type === "taskUpdate") {
+          if (msg.type === "taskUpdate" && msg.task) {
             if (!this.state.currentTask || msg.task.id === this.state.currentTask.id) {
               this.setCurrentTask(msg.task);
             }
             this.refreshSidebar();
-          } else if (msg.type === "screencastFrame") {
-            if (this.liveView && this.liveView.drawFrame)
-              this.liveView.drawFrame(msg.frame);
+          } else if (msg.type === "screencastFrame" && msg.frame) {
+            this.liveView.drawFrame(msg.frame);
           } else if (msg.type === "screencastError") {
             console.warn("Screencast error:", msg.error);
           }
@@ -1048,11 +1054,7 @@ class App {
   }
   async createTask(text) {
     const body = { task: text, sessionId: this.session.id };
-    const res = await fetch("/api/tasks", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
+    const res = await fetch("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const data = await res.json();
     if (res.ok) {
       const task = { id: data.taskId, description: text, status: "created", createdAt: new Date().toISOString(), steps: [], screenshots: [] };
@@ -1060,7 +1062,7 @@ class App {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ type: "subscribe", taskId: task.id }));
       }
-      this.refreshSidebar();
+      await this.refreshSidebar();
     } else {
       alert(data.error || "Failed to create task");
     }
@@ -1075,10 +1077,9 @@ class App {
     this.state.currentTask = task;
     this.taskStatus.update(task);
     this.activityLog.update(task.steps || []);
-    if (this.liveView && this.liveView.setTask)
-      this.liveView.setTask(task);
+    this.liveView.setTask(task);
     const last = (task.screenshots || [])[task.screenshots.length - 1];
-    if (last && !(this.liveView && this.liveView.isStreaming && this.liveView.isStreaming())) {
+    if (last && !(this.liveView.isStreaming && this.liveView.isStreaming())) {
       this.liveView.update(last.data);
     }
     if (this.ws && this.ws.readyState === WebSocket.OPEN && task && task.id) {
@@ -1094,10 +1095,32 @@ class App {
       if (this.sidebar && this.sidebar.update) {
         this.sidebar.update(tasks, this.state.currentTask && this.state.currentTask.id);
       }
+      this.persistSidebarTasks(tasks);
     } catch {}
+  }
+  persistSidebarTasks(tasks) {
+    try {
+      const key = `session:${this.session.id}:tasks`;
+      const lite = tasks.map((t) => ({ id: t.id, description: t.description, status: t.status, updatedAt: t.updatedAt, createdAt: t.createdAt }));
+      localStorage.setItem(key, JSON.stringify(lite));
+    } catch {}
+  }
+  loadSidebarTasks() {
+    try {
+      const key = `session:${this.session.id}:tasks`;
+      const raw = localStorage.getItem(key);
+      if (!raw)
+        return [];
+      const arr = JSON.parse(raw);
+      return arr.map((t) => ({ ...t, steps: [], screenshots: [] }));
+    } catch {
+      return [];
+    }
   }
 }
 document.addEventListener("DOMContentLoaded", () => {
   const root = document.getElementById("app");
+  if (!root)
+    throw new Error("App root not found");
   new App(root);
 });

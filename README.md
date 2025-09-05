@@ -54,13 +54,11 @@ The setup script will create a `.env` file with the following configuration:
 
 ```env
 # Azure OpenAI Configuration
-AZURE_OPENAI_ENDPOINT=https://your-resource-name.openai.azure.com/
 AZURE_OPENAI_API_KEY=your-api-key-here
 AZURE_OPENAI_API_VERSION=2024-12-01-preview
 AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o
 
 # Server Configuration
-PORT=3001
 NODE_ENV=development
 
 # Browser Configuration

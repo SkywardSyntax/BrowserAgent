@@ -1,4 +1,12 @@
-export function TaskStatus({ onPause, onResume, onStop }) {
+import type { Task } from '../types';
+
+interface Props {
+  onPause?: () => void;
+  onResume?: () => void;
+  onStop?: () => void;
+}
+
+export function TaskStatus({ onPause, onResume, onStop }: Props): HTMLDivElement & { update: (task: Task | null) => void } {
   const wrap = document.createElement('div');
 
   const header = document.createElement('div');
@@ -30,13 +38,11 @@ export function TaskStatus({ onPause, onResume, onStop }) {
   const pause = btn('Pause', () => onPause && onPause());
   const resume = btn('Resume', () => onResume && onResume());
   const stop = btn('Stop', () => onStop && onStop(), 'danger');
-  const spacer = document.createElement('div');
-  spacer.style.flex = '1';
   controls.append(pause, resume, stop);
 
   wrap.append(header, desc, meta, details, controls);
 
-  function btn(text, handler, variant='') {
+  function btn(text: string, handler: () => void, variant = ''): HTMLButtonElement {
     const b = document.createElement('button');
     b.className = `btn ${variant}`;
     b.textContent = text;
@@ -44,14 +50,14 @@ export function TaskStatus({ onPause, onResume, onStop }) {
     return b;
   }
 
-  function update(task) {
+  function update(task: Task | null): void {
     if (!task) {
       pill.className = 'pill created';
       pill.textContent = 'none';
       desc.textContent = '—';
       meta.textContent = '';
       details.textContent = '';
-      [pause, resume, stop].forEach(b => b.disabled = true);
+      [pause, resume, stop].forEach((b) => (b.disabled = true));
       return;
     }
     const s = task.status || 'created';
@@ -71,7 +77,7 @@ export function TaskStatus({ onPause, onResume, onStop }) {
     details.textContent = extra;
     pause.disabled = s !== 'running';
     resume.disabled = s !== 'paused';
-    stop.disabled = ['completed','failed','stopped'].includes(s);
+    stop.disabled = ['completed', 'failed', 'stopped'].includes(s);
   }
 
   update(null);
