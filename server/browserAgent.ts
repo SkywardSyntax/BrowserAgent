@@ -4,6 +4,7 @@ import { OpenAI } from 'openai';
 import type { TaskManager, Task } from './taskManager';
 import { createHash } from 'crypto';
 import { TaskStateMachine, BrowserControlStateMachine, LoopStateMachine, TaskState, BrowserControlState, LoopState } from './taskStateMachines';
+import { LangChainAIOrchestrator, type BrowserAction } from './langchainAI';
 
 type KeyMap = Record<string, string>;
 
@@ -49,6 +50,9 @@ export class BrowserAgent {
     totalRequests: 0,
     lastMetricsReset: Date.now()
   };
+  
+  // LangChain AI orchestrator for enhanced AI model management
+  private langchainAI: LangChainAIOrchestrator;
 
   constructor(taskManager: TaskManager) {
     this.taskManager = taskManager;
@@ -79,6 +83,14 @@ export class BrowserAgent {
       defaultHeaders: { 'api-key': process.env.AZURE_OPENAI_API_KEY || '' },
       timeout: parseInt(process.env.OPENAI_TIMEOUT_MS || '60000', 10),
     });
+
+    // Initialize LangChain AI orchestrator
+    this.langchainAI = new LangChainAIOrchestrator(
+      process.env.AZURE_OPENAI_API_KEY || '',
+      process.env.AZURE_OPENAI_ENDPOINT || '',
+      process.env.AZURE_OPENAI_DEPLOYMENT_NAME || 'gpt-4o',
+      this.reasoningEffort
+    );
 
     this.displayWidth = parseInt(process.env.DISPLAY_WIDTH || '1280', 10);
     this.displayHeight = parseInt(process.env.DISPLAY_HEIGHT || '720', 10);
@@ -362,32 +374,80 @@ export class BrowserAgent {
 
   async requestManualControl(taskId: string): Promise<boolean> {
     const taskSM = this.getOrCreateTaskStateMachine(taskId);
-    if ((taskSM.isRunning() || taskSM.isPaused()) && await taskSM.takeManualControl()) {
-      const granted = await this.browserControlSM.requestManualControl();
-      try { console.log(`[Control] Manual control ${granted ? 'granted' : 'denied'} for task ${taskId}`); } catch {}
-      return granted;
+    
+    // Validate that we can take manual control
+    if (!taskSM.isRunning() && !taskSM.isPaused()) {
+      console.warn(`[Control] Cannot request manual control for task ${taskId}: invalid state (current: ${taskSM.getCurrentState()})`);
+      return false;
     }
-    return false;
+    
+    try {
+      // First, request manual control from browser control state machine
+      const browserControlGranted = await this.browserControlSM.requestManualControl();
+      if (!browserControlGranted) {
+        console.error(`[Control] Browser control state machine denied manual control for task ${taskId}`);
+        return false;
+      }
+      
+      // Then transition the task state to manual control
+      const taskTransitionSuccess = await taskSM.takeManualControl();
+      if (!taskTransitionSuccess) {
+        console.error(`[Control] Failed to transition task ${taskId} to manual control`);
+        // Rollback browser control transition
+        await this.browserControlSM.requestAIControl();
+        return false;
+      }
+      
+      console.log(`[Control] Manual control granted for task ${taskId}`);
+      return true;
+    } catch (error) {
+      console.error(`[Control] Error requesting manual control for task ${taskId}:`, error);
+      return false;
+    }
   }
 
   async releaseManualControl(taskId: string): Promise<boolean> {
     const taskSM = this.getOrCreateTaskStateMachine(taskId);
-    if (taskSM.isInManualControl() && await taskSM.giveControlToAI()) {
-      const granted = await this.browserControlSM.requestAIControl();
-      try { console.log(`[Control] AI control ${granted ? 'granted' : 'not granted'} for task ${taskId}`); } catch {}
-      // If the AI loop isn't currently running for this task (e.g., it ended during manual control), restart it
-      if (granted) {
-        try {
-          if (!this.processingTasks.has(taskId)) {
-            console.log(`[Control] Kicking AI loop for task ${taskId} after control release`);
-            // Fire and forget; internal guard prevents duplicate processing
-            this.processTask(taskId);
-          }
-        } catch {}
-      }
-      return granted;
+    
+    // Validate current state before attempting transition
+    if (!taskSM.isInManualControl()) {
+      console.warn(`[Control] Cannot release manual control for task ${taskId}: not in manual control state (current: ${taskSM.getCurrentState()})`);
+      return false;
     }
-    return false;
+    
+    try {
+      // First, try to transition the task state from manual control to running
+      const taskTransitionSuccess = await taskSM.giveControlToAI();
+      if (!taskTransitionSuccess) {
+        console.error(`[Control] Failed to transition task ${taskId} from manual control to AI`);
+        return false;
+      }
+      
+      // Then request AI control from browser control state machine
+      const browserControlGranted = await this.browserControlSM.requestAIControl();
+      if (!browserControlGranted) {
+        console.error(`[Control] Browser control state machine denied AI control for task ${taskId}`);
+        // Rollback the task state transition
+        await taskSM.takeManualControl();
+        return false;
+      }
+      
+      console.log(`[Control] AI control granted for task ${taskId}`);
+      
+      // If the AI loop isn't currently running for this task (e.g., it ended during manual control), restart it
+      if (!this.processingTasks.has(taskId)) {
+        console.log(`[Control] Restarting AI loop for task ${taskId} after control release`);
+        // Use a small delay to ensure state has settled
+        setTimeout(() => {
+          this.processTask(taskId);
+        }, 100);
+      }
+      
+      return true;
+    } catch (error) {
+      console.error(`[Control] Error releasing manual control for task ${taskId}:`, error);
+      return false;
+    }
   }
 
   async getPageState(): Promise<{ url: string; title: string; headless: boolean; viewport: { width: number; height: number } }> {
@@ -452,6 +512,13 @@ export class BrowserAgent {
       this.processingTasks.delete(taskId); 
       const hb = this.heartbeats.get(taskId);
       if (hb) { try { clearInterval(hb); } catch {} this.heartbeats.delete(taskId); }
+      
+      // Clean up LangChain context for completed/failed tasks
+      try {
+        this.langchainAI.clearTaskContext(taskId);
+      } catch (error) {
+        console.warn(`Warning: Failed to clear LangChain context for task ${taskId}:`, error);
+      }
     }
   }
 
@@ -490,44 +557,58 @@ export class BrowserAgent {
     }
   }
 
-  // New state machine-based processing loop for better reliability and control flow
+  // Enhanced state machine-based processing loop with LangChain integration
   async aiProcessingLoopWithStateMachine(taskId: string): Promise<void> {
     const taskSM = this.getOrCreateTaskStateMachine(taskId);
     const loopSM = new LoopStateMachine();
     let iterations = 0;
+    let consecutiveFailures = 0;
+    const MAX_CONSECUTIVE_FAILURES = 3;
+
+    console.log(`[AI Loop] Starting enhanced processing loop for task ${taskId}`);
 
     while (taskSM.isActive()) {
       iterations++;
       
       // Check for state changes that require breaking out of the loop
       if (taskSM.isInManualControl()) {
-        console.log(`Task ${taskId} is under manual control, waiting...`);
+        console.log(`[AI Loop] Task ${taskId} is under manual control, pausing AI processing...`);
         await this.waitForManualControlRelease(taskId);
         // Small backoff before continuing to allow control state to settle
-        await this.delay(100);
+        await this.delay(200);
         continue;
       }
       
       if (taskSM.isPaused()) {
-        console.log(`Task ${taskId} is paused, waiting...`);
+        console.log(`[AI Loop] Task ${taskId} is paused, waiting for resume...`);
         await this.waitForResume(taskId);
         continue;
       }
       
       if (!taskSM.isRunning()) {
-        console.log(`Task ${taskId} is no longer running`);
+        console.log(`[AI Loop] Task ${taskId} is no longer running (state: ${taskSM.getCurrentState()})`);
         break;
       }
 
-      // Only proceed if under AI control
+      // Only proceed if under AI control - wait if transitioning
       if (!this.browserControlSM.isUnderAIControl()) {
-        await this.delay(100);
-        continue;
+        if (this.browserControlSM.isTransitioning()) {
+          console.log(`[AI Loop] Browser control transitioning, waiting...`);
+          await this.delay(200);
+          continue;
+        } else {
+          console.log(`[AI Loop] Not under AI control, pausing...`);
+          await this.delay(500);
+          continue;
+        }
       }
 
       try {
         // Start iteration
-        if (!await loopSM.startIteration()) continue;
+        if (!await loopSM.startIteration()) {
+          await this.delay(100);
+          continue;
+        }
 
         // Take screenshot
         let screenshot: string;
@@ -536,56 +617,67 @@ export class BrowserAgent {
           this.taskManager.addScreenshot(taskId, screenshot);
           await loopSM.screenshotTaken();
         } catch (error) {
-          console.error('Screenshot failed:', error);
+          console.error(`[AI Loop] Screenshot failed for task ${taskId}:`, error);
           await loopSM.screenshotFailed();
-          if (loopSM.shouldAbortLoop()) {
+          consecutiveFailures++;
+          
+          if (loopSM.shouldAbortLoop() || consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
             await loopSM.recoveryFailed();
             await taskSM.fail();
             this.taskManager.failTask(taskId, 'Too many screenshot failures');
             break;
           }
+          
           // Attempt recovery for next iteration
           await loopSM.recovered();
+          await this.delay(1000);
           continue;
         }
 
-        // Call AI
-        let response: unknown;
+        // Call AI using LangChain orchestrator
+        let aiResponse: BrowserAction;
         try {
           const task = this.taskManager.getTask(taskId);
-          if (!task) break;
+          if (!task) {
+            console.log(`[AI Loop] Task ${taskId} not found, stopping loop`);
+            break;
+          }
           
-          response = await this.callAI(task, screenshot);
+          console.log(`[AI Loop] Calling LangChain AI for task ${taskId}...`);
+          aiResponse = await this.langchainAI.analyzeAndPlan(task, screenshot);
           await loopSM.aiResponded();
+          consecutiveFailures = 0; // Reset failure counter on success
         } catch (error) {
-          console.error('AI call failed:', error);
+          console.error(`[AI Loop] AI call failed for task ${taskId}:`, error);
           await loopSM.aiFailed();
-          if (loopSM.shouldAbortLoop()) {
+          consecutiveFailures++;
+          
+          if (loopSM.shouldAbortLoop() || consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
             await loopSM.recoveryFailed();
             await taskSM.fail();
             this.taskManager.failTask(taskId, 'Too many AI failures');
             break;
           }
+          
           // Attempt recovery for next iteration
           await loopSM.recovered();
+          await this.delay(2000);
           continue;
         }
 
-        // Process response
+        // Process LangChain response
         try {
-          const { shouldContinue, executed } = await this.processAIResponse(taskId, response);
+          const { shouldContinue, executed } = await this.processLangChainResponse(taskId, aiResponse);
           await loopSM.responseProcessed();
           
           if (!shouldContinue) {
             await taskSM.complete();
-            this.taskManager.completeTask(taskId, 'Task completed successfully');
+            this.taskManager.completeTask(taskId, 'Task completed successfully by LangChain AI');
             break;
           }
 
-          // Check for progress
-          await this.delay(500);
-          const hasProgress = await this.checkProgress(taskId, executed);
-          
+          // Check progress using enhanced analysis
+          const hasProgress = await this.checkProgressWithLangChain(taskId, executed, aiResponse);
           if (hasProgress) {
             await loopSM.iterationComplete();
           } else {
@@ -601,28 +693,33 @@ export class BrowserAgent {
           }
 
         } catch (error) {
-          console.error('Response processing failed:', error);
+          console.error(`[AI Loop] Response processing failed for task ${taskId}:`, error);
           await loopSM.processingFailed();
-          if (loopSM.shouldAbortLoop()) {
+          consecutiveFailures++;
+          
+          if (loopSM.shouldAbortLoop() || consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
             await loopSM.recoveryFailed();
             await taskSM.fail();
             this.taskManager.failTask(taskId, 'Too many processing failures');
             break;
           }
+          
           // Attempt recovery for next iteration
           await loopSM.recovered();
         }
 
+        // Small delay between iterations
         await this.delay(500);
 
       } catch (error) {
-        console.error(`Error in AI processing loop iteration ${iterations}:`, error);
+        console.error(`[AI Loop] Unexpected error in iteration ${iterations} for task ${taskId}:`, error);
         this.taskManager.addStep(taskId, { 
           type: 'error', 
-          description: `Error: ${(error as Error).message}`, 
+          description: `Unexpected error: ${(error as Error).message}`, 
           error: true 
         });
 
+        // Handle critical errors
         if ((error as Error).message.includes('browser') || 
             (error as Error).message.includes('page')) {
           await taskSM.fail();
@@ -631,16 +728,197 @@ export class BrowserAgent {
 
         const errName = (error as { name?: string }).name;
         if (errName === 'AbortError') {
+          console.log(`[AI Loop] Task ${taskId} aborted, waiting for resume...`);
           await this.waitForResume(taskId);
+        } else {
+          consecutiveFailures++;
+          if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            await taskSM.fail();
+            this.taskManager.failTask(taskId, `Too many consecutive errors: ${(error as Error).message}`);
+            break;
+          }
+          await this.delay(1000);
         }
       }
     }
+
+    console.log(`[AI Loop] Processing loop ended for task ${taskId} after ${iterations} iterations`);
   }
 
   private async waitForManualControlRelease(taskId: string): Promise<void> {
     const taskSM = this.getOrCreateTaskStateMachine(taskId);
     while (taskSM.isInManualControl()) {
       await this.delay(1000);
+    }
+  }
+
+  // Process LangChain AI response and execute browser actions
+  private async processLangChainResponse(taskId: string, aiResponse: BrowserAction): Promise<{ shouldContinue: boolean; executed: Array<{ key: string; success: boolean }> }> {
+    try {
+      const executed: Array<{ key: string; success: boolean }> = [];
+      
+      // Log AI reasoning
+      this.taskManager.addStep(taskId, {
+        type: 'ai_reasoning',
+        description: `AI Analysis: ${aiResponse.overall_reasoning}`,
+        reasoning: aiResponse.overall_reasoning
+      });
+
+      // Log progress assessment
+      this.taskManager.addStep(taskId, {
+        type: 'progress_assessment',
+        description: `Progress Assessment (${Math.round(aiResponse.progress_assessment.confidence * 100)}% confidence)`,
+        completed_steps: aiResponse.progress_assessment.completed_steps,
+        next_steps: aiResponse.progress_assessment.next_steps,
+        confidence: aiResponse.progress_assessment.confidence
+      });
+
+      // Execute each action in sequence
+      for (const action of aiResponse.actions) {
+        const actionKey = `${action.action}_${Date.now()}`;
+        let success = false;
+
+        try {
+          // Log action reasoning
+          this.taskManager.addStep(taskId, {
+            type: 'action_reasoning',
+            description: `Action Reasoning: ${action.reasoning}`,
+            action: action.action,
+            reasoning: action.reasoning
+          });
+
+          switch (action.action) {
+            case 'click':
+              if (action.coordinate && action.coordinate.length === 2) {
+                await this.executeBrowserAction(taskId, {
+                  action: 'click',
+                  coordinate: action.coordinate
+                });
+                success = true;
+              }
+              break;
+
+            case 'type':
+              if (action.text) {
+                await this.executeBrowserAction(taskId, {
+                  action: 'type',
+                  text: action.text
+                });
+                success = true;
+              }
+              break;
+
+            case 'scroll':
+              if (action.direction && action.pixels) {
+                await this.executeBrowserAction(taskId, {
+                  action: 'scroll',
+                  direction: action.direction,
+                  pixels: action.pixels
+                });
+                success = true;
+              }
+              break;
+
+            case 'key':
+              if (action.key) {
+                await this.executeBrowserAction(taskId, {
+                  action: 'key',
+                  key: action.key
+                });
+                success = true;
+              }
+              break;
+
+            case 'navigate':
+              if (action.url) {
+                await this.executeBrowserAction(taskId, {
+                  action: 'navigate',
+                  url: action.url
+                });
+                success = true;
+              }
+              break;
+
+            case 'wait':
+              if (action.time) {
+                await this.executeBrowserAction(taskId, {
+                  action: 'wait',
+                  time: action.time
+                });
+                success = true;
+              }
+              break;
+
+            case 'task_complete':
+              // Mark task as completed and add progress marker
+              this.langchainAI.addProgressMarker(taskId, 'Task completed successfully');
+              return { shouldContinue: false, executed };
+          }
+
+          // Record action result in LangChain orchestrator
+          this.langchainAI.recordActionResult(taskId, action.action, success);
+
+        } catch (error) {
+          console.error(`Error executing action ${action.action}:`, error);
+          success = false;
+          this.langchainAI.recordActionResult(taskId, action.action, false);
+        }
+
+        executed.push({ key: actionKey, success });
+
+        // Small delay between actions for reliability
+        await this.delay(100);
+      }
+
+      return { shouldContinue: true, executed };
+
+    } catch (error) {
+      console.error('Error processing LangChain response:', error);
+      throw error;
+    }
+  }
+
+  // Enhanced progress checking using LangChain context
+  private async checkProgressWithLangChain(
+    taskId: string, 
+    executed: Array<{ key: string; success: boolean }>, 
+    aiResponse: BrowserAction
+  ): Promise<boolean> {
+    try {
+      // Get progress metrics from LangChain
+      const progress = this.langchainAI.getTaskProgress(taskId);
+      
+      // Calculate success rate of recent actions
+      const recentSuccessRate = executed.length > 0 ? 
+        executed.filter(a => a.success).length / executed.length : 0;
+
+      // Use AI's confidence assessment
+      const aiConfidence = aiResponse.progress_assessment.confidence;
+
+      // Check for completed steps
+      const hasCompletedSteps = aiResponse.progress_assessment.completed_steps.length > 0;
+
+      // Traditional progress detection
+      const traditionalProgress = await this.checkProgress(taskId, executed);
+
+      // Combined progress assessment
+      const hasProgress = recentSuccessRate > 0.5 || 
+                         aiConfidence > 0.7 || 
+                         hasCompletedSteps || 
+                         traditionalProgress;
+
+      if (hasProgress) {
+        // Add progress marker to LangChain context
+        const marker = `Actions: ${executed.length}, Success rate: ${Math.round(recentSuccessRate * 100)}%, AI confidence: ${Math.round(aiConfidence * 100)}%`;
+        this.langchainAI.addProgressMarker(taskId, marker);
+      }
+
+      return hasProgress;
+
+    } catch (error) {
+      console.error('Error checking progress with LangChain:', error);
+      // Fallback to traditional progress checking
+      return await this.checkProgress(taskId, executed);
     }
   }
 

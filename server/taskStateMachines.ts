@@ -39,22 +39,90 @@ export class TaskStateMachine extends StateMachine<TaskState> {
         { from: TaskState.CREATED, to: TaskState.INITIALIZING, event: 'START' },
         { from: TaskState.INITIALIZING, to: TaskState.RUNNING, event: 'INITIALIZED' },
         { from: TaskState.INITIALIZING, to: TaskState.FAILED, event: 'INIT_FAILED' },
-        { from: TaskState.RUNNING, to: TaskState.PAUSED, event: 'PAUSE' },
-        { from: TaskState.RUNNING, to: TaskState.MANUAL_CONTROL, event: 'MANUAL_TAKEOVER' },
+        
+        // Core state transitions with proper guards
+        { 
+          from: TaskState.RUNNING, 
+          to: TaskState.PAUSED, 
+          event: 'PAUSE',
+          guard: () => {
+            const task = taskManager.getTask(taskId);
+            return task ? task.status !== 'stopped' : false;
+          }
+        },
+        { 
+          from: TaskState.RUNNING, 
+          to: TaskState.MANUAL_CONTROL, 
+          event: 'MANUAL_TAKEOVER',
+          guard: () => {
+            const task = taskManager.getTask(taskId);
+            return task ? task.status !== 'stopped' : false;
+          }
+        },
         // Allow manual control request while paused as well
-        { from: TaskState.PAUSED, to: TaskState.MANUAL_CONTROL, event: 'MANUAL_TAKEOVER' },
+        { 
+          from: TaskState.PAUSED, 
+          to: TaskState.MANUAL_CONTROL, 
+          event: 'MANUAL_TAKEOVER',
+          guard: () => {
+            const task = taskManager.getTask(taskId);
+            return task ? task.status !== 'stopped' : false;
+          }
+        },
+        
+        // Completion and failure transitions
         { from: TaskState.RUNNING, to: TaskState.COMPLETED, event: 'COMPLETE' },
         { from: TaskState.RUNNING, to: TaskState.FAILED, event: 'FAIL' },
-        { from: TaskState.PAUSED, to: TaskState.RUNNING, event: 'RESUME' },
-        { from: TaskState.MANUAL_CONTROL, to: TaskState.RUNNING, event: 'AI_TAKEOVER' },
-        { from: TaskState.MANUAL_CONTROL, to: TaskState.PAUSED, event: 'PAUSE' },
-        { from: TaskState.MANUAL_CONTROL, to: TaskState.RUNNING, event: 'RESUME' },
+        
+        // Resume transitions with guards
+        { 
+          from: TaskState.PAUSED, 
+          to: TaskState.RUNNING, 
+          event: 'RESUME',
+          guard: () => {
+            const task = taskManager.getTask(taskId);
+            return task ? task.status !== 'stopped' : false;
+          }
+        },
+        
+        // Manual control release transitions - these are the critical ones that were causing issues
+        { 
+          from: TaskState.MANUAL_CONTROL, 
+          to: TaskState.RUNNING, 
+          event: 'AI_TAKEOVER',
+          guard: () => {
+            const task = taskManager.getTask(taskId);
+            return task ? task.status !== 'stopped' && !task.paused : false;
+          }
+        },
+        // Allow transitioning from manual control to paused state for safety
+        { 
+          from: TaskState.MANUAL_CONTROL, 
+          to: TaskState.PAUSED, 
+          event: 'PAUSE',
+          guard: () => {
+            const task = taskManager.getTask(taskId);
+            return task ? task.status !== 'stopped' : false;
+          }
+        },
+        // Resume from manual control should go to running
+        { 
+          from: TaskState.MANUAL_CONTROL, 
+          to: TaskState.RUNNING, 
+          event: 'RESUME',
+          guard: () => {
+            const task = taskManager.getTask(taskId);
+            return task ? task.status !== 'stopped' : false;
+          }
+        },
+        
         // Stop transitions from any active state
         { from: TaskState.RUNNING, to: TaskState.STOPPING, event: 'STOP' },
         { from: TaskState.PAUSED, to: TaskState.STOPPING, event: 'STOP' },
         { from: TaskState.MANUAL_CONTROL, to: TaskState.STOPPING, event: 'STOP' },
         { from: TaskState.STOPPING, to: TaskState.COMPLETED, event: 'STOPPED' },
         { from: TaskState.STOPPING, to: TaskState.FAILED, event: 'STOP_FAILED' },
+        
         // Allow FAIL transition from any active state for error handling
         { from: TaskState.INITIALIZING, to: TaskState.FAILED, event: 'FAIL' },
         { from: TaskState.PAUSED, to: TaskState.FAILED, event: 'FAIL' },
@@ -164,6 +232,9 @@ export class TaskStateMachine extends StateMachine<TaskState> {
 }
 
 export class BrowserControlStateMachine extends StateMachine<BrowserControlState> {
+  private lastTransitionTime: number = 0;
+  private readonly TRANSITION_COOLDOWN = 100; // 100ms cooldown between transitions
+
   constructor() {
     const config: StateMachineConfig<BrowserControlState> = {
       initial: BrowserControlState.AI_CONTROL,
@@ -172,27 +243,77 @@ export class BrowserControlStateMachine extends StateMachine<BrowserControlState
         { 
           from: BrowserControlState.AI_CONTROL, 
           to: BrowserControlState.TRANSITIONING, 
-          event: 'REQUEST_MANUAL_CONTROL' 
+          event: 'REQUEST_MANUAL_CONTROL',
+          guard: () => {
+            const now = Date.now();
+            return now - this.lastTransitionTime >= this.TRANSITION_COOLDOWN;
+          },
+          action: () => {
+            this.lastTransitionTime = Date.now();
+          }
         },
         { 
           from: BrowserControlState.TRANSITIONING, 
           to: BrowserControlState.MANUAL_CONTROL, 
-          event: 'MANUAL_CONTROL_GRANTED' 
+          event: 'MANUAL_CONTROL_GRANTED',
+          action: () => {
+            this.lastTransitionTime = Date.now();
+          }
         },
         { 
           from: BrowserControlState.MANUAL_CONTROL, 
           to: BrowserControlState.TRANSITIONING, 
-          event: 'REQUEST_AI_CONTROL' 
+          event: 'REQUEST_AI_CONTROL',
+          guard: () => {
+            const now = Date.now();
+            return now - this.lastTransitionTime >= this.TRANSITION_COOLDOWN;
+          },
+          action: () => {
+            this.lastTransitionTime = Date.now();
+          }
         },
         { 
           from: BrowserControlState.TRANSITIONING, 
           to: BrowserControlState.AI_CONTROL, 
-          event: 'AI_CONTROL_GRANTED' 
+          event: 'AI_CONTROL_GRANTED',
+          action: () => {
+            this.lastTransitionTime = Date.now();
+          }
+        },
+        // Emergency reset transitions - if we get stuck in transitioning state
+        {
+          from: BrowserControlState.TRANSITIONING,
+          to: BrowserControlState.AI_CONTROL,
+          event: 'FORCE_AI_CONTROL',
+          action: () => {
+            this.lastTransitionTime = Date.now();
+            console.warn('Forced transition to AI control from stuck transitioning state');
+          }
+        },
+        {
+          from: BrowserControlState.TRANSITIONING,
+          to: BrowserControlState.MANUAL_CONTROL,
+          event: 'FORCE_MANUAL_CONTROL',
+          action: () => {
+            this.lastTransitionTime = Date.now();
+            console.warn('Forced transition to manual control from stuck transitioning state');
+          }
         }
       ]
     };
 
     super(config);
+    
+    // Set up a safety mechanism to detect stuck transitions
+    setInterval(() => {
+      if (this.is(BrowserControlState.TRANSITIONING)) {
+        const timeSinceLastTransition = Date.now() - this.lastTransitionTime;
+        if (timeSinceLastTransition > 5000) { // 5 seconds stuck in transitioning
+          console.warn('Browser control stuck in transitioning state, forcing to AI control');
+          this.transition('FORCE_AI_CONTROL');
+        }
+      }
+    }, 2000);
   }
 
   async requestManualControl(): Promise<boolean> {
