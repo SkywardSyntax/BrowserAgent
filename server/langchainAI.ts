@@ -180,30 +180,46 @@ Focus on accomplishing the objective efficiently and reliably.`;
   }
 
   recordActionResult(taskId: string, action: string, success: boolean): void {
-    const context = this.taskContext.get(taskId);
-    if (context) {
-      context.actions.push({
-        action,
-        success,
-        timestamp: Date.now()
+    // Ensure context exists
+    if (!this.taskContext.has(taskId)) {
+      this.taskContext.set(taskId, {
+        screenshots: [],
+        actions: [],
+        currentObjective: 'Unknown objective',
+        progressMarkers: []
       });
+    }
+    
+    const context = this.taskContext.get(taskId)!;
+    context.actions.push({
+      action,
+      success,
+      timestamp: Date.now()
+    });
 
-      // Keep action history manageable
-      if (context.actions.length > 20) {
-        context.actions.shift();
-      }
+    // Keep action history manageable
+    if (context.actions.length > 20) {
+      context.actions.shift();
     }
   }
 
   addProgressMarker(taskId: string, marker: string): void {
-    const context = this.taskContext.get(taskId);
-    if (context) {
-      context.progressMarkers.push(marker);
-      
-      // Keep progress markers manageable
-      if (context.progressMarkers.length > 10) {
-        context.progressMarkers.shift();
-      }
+    // Ensure context exists
+    if (!this.taskContext.has(taskId)) {
+      this.taskContext.set(taskId, {
+        screenshots: [],
+        actions: [],
+        currentObjective: 'Unknown objective',
+        progressMarkers: []
+      });
+    }
+    
+    const context = this.taskContext.get(taskId)!;
+    context.progressMarkers.push(marker);
+    
+    // Keep progress markers manageable
+    if (context.progressMarkers.length > 10) {
+      context.progressMarkers.shift();
     }
   }
 

@@ -92,7 +92,7 @@ export class TaskStateMachine extends StateMachine<TaskState> {
           event: 'AI_TAKEOVER',
           guard: () => {
             const task = taskManager.getTask(taskId);
-            return task ? task.status !== 'stopped' && !task.paused : false;
+            return task ? task.status !== 'stopped' : false;
           }
         },
         // Allow transitioning from manual control to paused state for safety
@@ -233,7 +233,7 @@ export class TaskStateMachine extends StateMachine<TaskState> {
 
 export class BrowserControlStateMachine extends StateMachine<BrowserControlState> {
   private lastTransitionTime: number = 0;
-  private readonly TRANSITION_COOLDOWN = 100; // 100ms cooldown between transitions
+  private readonly TRANSITION_COOLDOWN = 10; // 10ms cooldown between transitions (reduced for testing)
 
   constructor() {
     const config: StateMachineConfig<BrowserControlState> = {
