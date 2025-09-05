@@ -54,7 +54,12 @@ export class TaskStateMachine extends StateMachine<TaskState> {
         { from: TaskState.PAUSED, to: TaskState.STOPPING, event: 'STOP' },
         { from: TaskState.MANUAL_CONTROL, to: TaskState.STOPPING, event: 'STOP' },
         { from: TaskState.STOPPING, to: TaskState.COMPLETED, event: 'STOPPED' },
-        { from: TaskState.STOPPING, to: TaskState.FAILED, event: 'STOP_FAILED' }
+        { from: TaskState.STOPPING, to: TaskState.FAILED, event: 'STOP_FAILED' },
+        // Allow FAIL transition from any active state for error handling
+        { from: TaskState.INITIALIZING, to: TaskState.FAILED, event: 'FAIL' },
+        { from: TaskState.PAUSED, to: TaskState.FAILED, event: 'FAIL' },
+        { from: TaskState.MANUAL_CONTROL, to: TaskState.FAILED, event: 'FAIL' },
+        { from: TaskState.STOPPING, to: TaskState.FAILED, event: 'FAIL' }
       ]
     };
 

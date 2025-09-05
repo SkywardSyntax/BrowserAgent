@@ -3,9 +3,9 @@
     {
       "id": "2292570e-05d9-4109-8f33-40068b1803f1",
       "description": "Open “ https://utaustin-tx.vectorlmsedu.com/training/home” and login with “nb29255” username, and “SkywardSyntax2007” for password, and go to the mental well being course and complete the final assessment for mental well being",
-      "status": "running",
+      "status": "failed",
       "createdAt": "2025-09-05T17:14:59.975Z",
-      "updatedAt": "2025-09-05T17:15:01.424Z",
+      "updatedAt": "2025-09-05T17:20:36.243Z",
       "steps": [],
       "currentStep": null,
       "screenshots": [
@@ -20,9 +20,10 @@
           "timestamp": "2025-09-05T17:15:01.424Z"
         }
       ],
-      "error": null,
+      "error": "launch: Executable doesn't exist at /home/runner/.cache/ms-playwright/chromium_headless_shell-1187/chrome-linux/headless_shell\n╔═════════════════════════════════════════════════════════════════════════╗\n║ Looks like Playwright Test or Playwright was just installed or updated. ║\n║ Please run the following command to download new browsers:              ║\n║                                                                         ║\n║     npx playwright install                                              ║\n║                                                                         ║\n║ <3 Playwright Team                                                      ║\n╚═════════════════════════════════════════════════════════════════════════╝",
       "paused": false,
-      "sessionId": "489c5c61-14c7-4d7c-b492-018ddfdc0265"
+      "sessionId": "489c5c61-14c7-4d7c-b492-018ddfdc0265",
+      "failedAt": "2025-09-05T17:20:36.243Z"
     }
   ],
   "sessionTasks": [
@@ -33,5 +34,5 @@
       ]
     ]
   ],
-  "savedAt": "2025-09-05T17:15:01.726Z"
+  "savedAt": "2025-09-05T17:20:36.543Z"
 }

@@ -521,10 +521,13 @@ export class BrowserAgent {
           console.error('Screenshot failed:', error);
           await loopSM.screenshotFailed();
           if (loopSM.shouldAbortLoop()) {
+            await loopSM.recoveryFailed();
             await taskSM.fail();
             this.taskManager.failTask(taskId, 'Too many screenshot failures');
             break;
           }
+          // Attempt recovery for next iteration
+          await loopSM.recovered();
           continue;
         }
 
@@ -540,10 +543,13 @@ export class BrowserAgent {
           console.error('AI call failed:', error);
           await loopSM.aiFailed();
           if (loopSM.shouldAbortLoop()) {
+            await loopSM.recoveryFailed();
             await taskSM.fail();
             this.taskManager.failTask(taskId, 'Too many AI failures');
             break;
           }
+          // Attempt recovery for next iteration
+          await loopSM.recovered();
           continue;
         }
 
@@ -567,20 +573,26 @@ export class BrowserAgent {
           } else {
             await loopSM.noProgress();
             if (loopSM.shouldAbortLoop()) {
+              await loopSM.recoveryFailed();
               await taskSM.fail();
               this.taskManager.failTask(taskId, 'No progress after multiple attempts');
               break;
             }
+            // Attempt recovery for next iteration  
+            await loopSM.recovered();
           }
 
         } catch (error) {
           console.error('Response processing failed:', error);
           await loopSM.processingFailed();
           if (loopSM.shouldAbortLoop()) {
+            await loopSM.recoveryFailed();
             await taskSM.fail();
             this.taskManager.failTask(taskId, 'Too many processing failures');
             break;
           }
+          // Attempt recovery for next iteration
+          await loopSM.recovered();
         }
 
         await this.delay(500);
