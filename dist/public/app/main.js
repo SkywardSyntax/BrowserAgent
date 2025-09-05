@@ -1,4 +1,4 @@
-// public/app/main.js
+// public/app/state/session.tsx
 class Session {
   id;
   constructor() {
@@ -21,6 +21,8 @@ class Session {
     return this.id;
   }
 }
+
+// public/app/components/ThemeToggle.tsx
 function ThemeToggle() {
   const el = document.createElement("button");
   el.className = "theme-toggle";
@@ -35,6 +37,8 @@ function ThemeToggle() {
   el.addEventListener("click", () => set(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark"));
   return el;
 }
+
+// public/app/components/TaskInput.tsx
 function TaskInput({ onSubmit }) {
   const wrap = document.createElement("div");
   wrap.className = "task-input";
@@ -68,6 +72,8 @@ function TaskInput({ onSubmit }) {
   }
   return wrap;
 }
+
+// public/app/components/LiveBrowserView.tsx
 function LiveBrowserView() {
   const wrap = document.createElement("div");
   wrap.className = "live";
@@ -624,6 +630,8 @@ function LiveBrowserView() {
     isExpanded: () => expanded
   });
 }
+
+// public/app/components/ModelInfo.tsx
 function ModelInfo() {
   const box = document.createElement("div");
   box.style.marginTop = "12px";
@@ -657,6 +665,8 @@ ${extra.textContent}` : ""));
   }
   return Object.assign(box, { update });
 }
+
+// public/app/components/TaskStatus.tsx
 function TaskStatus({ onPause, onResume, onStop }) {
   const wrap = document.createElement("div");
   const header = document.createElement("div");
@@ -727,6 +737,8 @@ function TaskStatus({ onPause, onResume, onStop }) {
   update(null);
   return Object.assign(wrap, { update });
 }
+
+// public/app/components/Dropdown.tsx
 function Dropdown({ value, options = [], onChange, label = null, small = false }) {
   const wrap = document.createElement("div");
   wrap.className = `dropdown${small ? " small" : ""}`;
@@ -797,6 +809,8 @@ function Dropdown({ value, options = [], onChange, label = null, small = false }
     close
   });
 }
+
+// public/app/components/ActivityLog.tsx
 function ActivityLog() {
   const wrap = document.createElement("div");
   const controls = document.createElement("div");
@@ -857,6 +871,8 @@ function ActivityLog() {
   wrap.append(controls, box);
   return Object.assign(wrap, { update });
 }
+
+// public/app/components/TaskSidebar.tsx
 function TaskSidebar({ onSelect, onRename, onDelete }) {
   const wrap = document.createElement("div");
   wrap.className = "sidebar";
@@ -914,6 +930,8 @@ function TaskSidebar({ onSelect, onRename, onDelete }) {
   wrap.append(header, list);
   return Object.assign(wrap, { update });
 }
+
+// public/app/main.tsx
 var h = (tag, props = {}, ...children) => {
   const el = document.createElement(tag);
   Object.entries(props || {}).forEach(([k, v]) => {
